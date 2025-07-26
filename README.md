@@ -10,7 +10,7 @@
 [![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
 [![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
-
+Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 
 **Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.  
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
@@ -22,9 +22,32 @@ It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offe
 - **Auth**: Optional bearer‑token for admin endpoints  
 - **Logs**: Structured JSON with correlation IDs  
 
----
 
+
+
+## What is Matrix Hub?
+
+  Imagine PyPI for intelligent agents and custom tools—Matrix Hub ingests curated manifests from GitHub (or any remote catalog), lets you find the perfect agent in seconds using hybrid text + semantic search, and then safely installs everything into your project (pip, Docker, Git, or ZIP) with a single command. It even auto‑registers new services with your MCP Gateway, writes scaffolding adapters, and produces a lockfile so your builds are rock‑solid.  
+
+
+```mermaid 
+flowchart TD
+    A[Agent Authors<br>manifests] --> B[GitHub Catalog]
+    B --> C[Matrix Hub<br>catalog & install]
+    C --> D[CLI & SDK<br>agent‑creator]
+    C --> E[Agent Generator<br>planning_agent]
+    D & E --> F[Install Agents/Tools]
+    F --> G[MCP Gateway<br>runtime registry]
+    G --> H[Your App<br>invokes agents]
+```
+
+Ready to discover, install, and manage enterprise‑grade AI skills? 
 Explore the [full documentation](https://agent-matrix.github.io/matrix-hub/) to get started!  
+
+
+
+
+
 
 
 ## Quick start (docker compose)
@@ -53,18 +76,6 @@ You should see:
 ```
 The app container waits for Postgres to be healthy, then starts the API. Ingest is scheduled (see INGEST_INTERVAL_MIN in .env).
 
-## Architecture
-
-```mermaid 
-flowchart TD
-    A[Agent Authors<br>manifests] --> B[GitHub Catalog]
-    B --> C[Matrix Hub<br>catalog & install]
-    C --> D[CLI & SDK<br>agent‑creator]
-    C --> E[Agent Generator<br>planning_agent]
-    D & E --> F[Install Agents/Tools]
-    F --> G[MCP Gateway<br>runtime registry]
-    G --> H[Your App<br>invokes agents]
-```
 
 
 ## Environment
