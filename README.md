@@ -1,16 +1,28 @@
-# Matrix Hub
+<p align="left">
+  <img src="./assets/logo.png" alt="Matrix Hub Logo" width="300">
+</p>
 
-**Matrix Hub** is a lightweight, production‑grade catalog and installer service for AI agents, tools, and MCP servers.  
-It ingests manifests from remote catalogs (e.g., GitHub), provides **search** (lexical + semantic, hybrid‑ranked), computes and executes **install plans** (pip/uv, docker, git, zip), and optionally **registers** tools/servers with an MCP Gateway.
+# Matrix Hub
 
-- **API:** FastAPI on port **7300**
-- **DB:** PostgreSQL (SQLite supported for limited local use)
-- **Ingest:** Pull `index.json` from remote(s), validate manifests, (optionally) chunk+embed content
-- **Install:** Safe, idempotent steps + project adapters + lockfile generation
-- **Auth:** Optional bearer token for admin routes
-- **Logs:** Structured JSON with correlation IDs
+[![Docker Pulls](https://img.shields.io/docker/pulls/agentmatrix/matrix-hub.svg)]  
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)]  
+[![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)]  
+[![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)  
+[![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
+**Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.  
+It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
+
+- **API**: FastAPI on port **7300**  
+- **DB**: PostgreSQL (SQLite supported for lightweight/dev use)  
+- **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed  
+- **Install**: Idempotent steps, project adapters, lockfile generation  
+- **Auth**: Optional bearer‑token for admin endpoints  
+- **Logs**: Structured JSON with correlation IDs  
 
 ---
+
+Explore the [full documentation](https://agent-matrix.github.io/matrix-hub/) to get started!  
 
 
 ## Quick start (docker compose)
