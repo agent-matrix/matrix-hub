@@ -2,13 +2,15 @@
   <img src="./assets/logo.png" alt="Matrix Hub Logo" width="300">
 </p>
 
-# Matrix Hub
+# Matrix Hub
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/agentmatrix/matrix-hub.svg)]  
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)]  
-[![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)]  
-[![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)  
-[![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Docker Pulls](https://img.shields.io/docker/pulls/agentmatrix/matrix-hub.svg)](https://hub.docker.com/r/agentmatrix/matrix-hub)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/release/python-3100/)
+[![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
+[![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
+
 
 **Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.  
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
