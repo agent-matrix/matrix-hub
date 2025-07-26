@@ -4,27 +4,27 @@ The diagram below shows the “Ingest & Index Pluggable” → “Query & R
 
 ```mermaid
 flowchart LR
-    subgraph Ingest & Index Pluggable
-        G[GitHub Ingestor\nmanifests + READMEs] --> N[Normalizer\nvalidate + enrich + version]
-        N --> D[Catalog DB\nPostgres]
-        N --> C[Chunker\nname/desc/README/examples]
-        C --> E[Embedder\nmodel: MiniLM/*; Workers: in-process or Celery]
-        E --> V[Vector Index\npgvector ⟶ Milvus later]
-        N --> B[BlobStore\nlocal disk ⟶ S3/MinIO later]
-    end
+  subgraph Ingest & Index
+    GH[GitHub] --> N[Normalize]
+    N --> DB[Postgres]
+    N --> Ch[Chunk]
+    Ch --> Em[Embed]
+    Em --> VI[Vector Index]
+    N --> BS[Blob Store]
+  end
 
-    subgraph Query & Rank Stable API
-        U[User query + filters] --> S[/GET /catalog/search/]
-        S --> L[Lexical\npg_trgm BM25 ⟶ OpenSearch later]
-        S --> Q[Vector ANN\npgvector ⟶ Milvus later]
-        D --> L
-        V --> Q
-        L --> H[Hybrid Ranker\nweights in config]
-        Q --> H
-        H -->|top‑K| R[RAG optional\nfetch best chunks from BlobStore + summarize fit]
-        R --> O[JSON response: items + scores + fit_reason]
-        H --> O
-    end
+  subgraph Query & Rank
+    U[User Query] --> S[Search API]
+    S --> L[Lexical]
+    S --> V[Vector]
+    DB --> L
+    VI --> V
+    L --> H[Hybrid Rank]
+    V --> H
+    H --> R[RAG Optional]
+    R --> O[Response]
+    H --> O
+  end
 ````
 
 ### Implementation Mapping
