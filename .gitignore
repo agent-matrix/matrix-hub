@@ -37,3 +37,4 @@ pgdata/
 .DS_Store
 Thumbs.db
 /mcpgateway
+/site

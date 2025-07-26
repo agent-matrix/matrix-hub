@@ -36,7 +36,7 @@ Requirements: Docker 24+, docker compose plugin.
 
 ```bash
 # 1) Clone and enter the repo
-git clone [https://github.com/agent-matrix/matrix-hub.git](https://github.com/agent-matrix/matrix-hub.git)
+git clone https://github.com/agent-matrix/matrix-hub.git
 cd matrix-hub
 
 # 2) Create .env from template and adjust if needed

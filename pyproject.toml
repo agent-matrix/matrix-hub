@@ -35,6 +35,17 @@ dev = [
   "ruff>=0.4,<0.6",
 ]
 
+docs = [
+  "mkdocs>=1.5,<2.0",
+  "mkdocs-material>=9.0,<10.0",
+  "pymdown-extensions>=10.16,<11.0",
+  "markdown>=3.8,<4.0",
+  "PyYAML>=6.0,<7.0",
+  "mkdocs-mermaid2-plugin>=0.8,<1.0",
+
+]
+
+
 [project.urls]
 Homepage = "https://github.com/agent-matrix/matrix-hub"
 Issues = "https://github.com/agent-matrix/matrix-hub/issues"

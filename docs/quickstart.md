@@ -7,7 +7,7 @@
 ## 1) Clone and configure
 
 ```bash
-git clone [https://github.com/agent-matrix/matrix-hub.git](https://github.com/agent-matrix/matrix-hub.git)
+git clone https://github.com/agent-matrix/matrix-hub.git
 cd matrix-hub
 cp .env.example .env
 ```

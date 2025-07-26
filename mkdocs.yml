@@ -5,14 +5,15 @@ site_url: https://agent-matrix.github.io/matrix-hub/
 repo_name: agent-matrix/matrix-hub
 repo_url: https://github.com/agent-matrix/matrix-hub
 edit_uri: edit/main/docs/
-
 theme:
   name: material
   language: en
+  # Remove horizontal tabs, use left‑nav only
   features:
-    - navigation.tabs
+    - navigation.instant
+    - navigation.expand
     - navigation.sections
-    - navigation.footer
+    - navigation.top              
     - content.code.copy
     - content.action.edit
     - search.suggest
@@ -27,8 +28,10 @@ theme:
   icon:
     repo: fontawesome/brands/github
 
+# Enable Mermaid via plugin + SuperFences
 plugins:
   - search
+  - mermaid2                     # render mermaid diagrams natively
 
 markdown_extensions:
   - admonition
@@ -39,7 +42,11 @@ markdown_extensions:
   - toc:
       permalink: "#"
   - pymdownx.details
-  - pymdownx.superfences
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
   - pymdownx.highlight
   - pymdownx.inlinehilite
   - pymdownx.snippets
@@ -57,7 +64,28 @@ nav:
       - Ingestion: ingestion.md
       - Manifests: manifests.md
   - Search: search.md
-  - Install & Registration: install-and-registration.md
+  - Search Diagram: search-diagram.md
+  - Indexing:
+      - Architecture: indexing-architecture.md
+      - Ingestors: ingestors.md
+      - Normalization: normalization.md
+      - Chunking: chunking.md
+      - Embedding: embedding.md
+      - Vector Indexing: vector-indexing.md
+      - Blob Storage: blob-storage.md
+  - Querying:
+      - Architecture: querying-architecture.md
+      - Querying: querying.md
+  - Agents:
+      - Overview: agents.md
+      - Installation: agent-installation.md
+      - Registration: agent-registration.md
+      - SDK: sdk.md
+  - MCP Gateway:
+      - Overview: mcp-gateway.md
+      - Setup: setup-mcp-gateway.md
+      - Verification: verify-mcp-gateway.md
+  - 'Install & Registration': install-and-registration.md
   - Architecture: architecture.md
   - Deployment: deployment.md
   - Development: development.md
