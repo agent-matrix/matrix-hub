@@ -576,15 +576,14 @@
 <h1 id="indexing-architecture">Indexing Architecture<a class="headerlink" href="#indexing-architecture" title="Permanent link">#</a></h1>
 <p>Matrix Hub ingests <strong>manifests</strong> (agents, tools, MCP servers) from remote catalogs (e.g., GitHub), validates them, normalizes metadata into a relational <strong>Catalog DB</strong>, optionally chunks &amp; embeds long text, and updates a <strong>Vector Index</strong> plus a <strong>Blob Store</strong> for RAG.</p>
 <pre class="mermaid"><code>flowchart LR
-
 R[Remotes\nindex.json/tree/zip] --&gt; I[Ingestor]
-I --&gt; V[Validator\n(JSON Schema + policy)]
-V --&gt; N[Normalizer\n(manifest → DB rows)]
-N --&gt; D[(Catalog DB)]
+I --&gt; V[Validator\nJSON Schema + policy]
+V --&gt; N[Normalizer\nmanifest → DB rows]
+N --&gt; D[Catalog DB]
 N --&gt; C[Chunker\nname/desc/README]
 C --&gt; E[Embedder]
-E --&gt; X[(Vector Index)]
-N --&gt; B[(Blob Store)]</code></pre>
+E --&gt; X[Vector Index]
+N --&gt; B[Blob Store]</code></pre>
 <h2 id="goals">Goals<a class="headerlink" href="#goals" title="Permanent link">#</a></h2>
 <ul>
 <li><strong>Reuse-first</strong>: one canonical entry per <code>(type, id, version)</code>.</li>

@@ -576,14 +576,13 @@
 <h1 id="querying-architecture">Querying Architecture<a class="headerlink" href="#querying-architecture" title="Permanent link">#</a></h1>
 <p>Search blends <strong>lexical</strong> and <strong>semantic</strong> signals with quality &amp; recency, then optionally performs RAG to produce a “fit reason”.</p>
 <pre class="mermaid"><code>flowchart LR
-
-Q[User query + filters] --&gt; L[Lexical\npg_trgm/BM25]
-Q --&gt; S[Semantic\nANN]
-D[(Catalog DB)] --&gt; L
-X[(Vector Index)] --&gt; S
+Q[User query + filters] --&gt; L[Lexical BM25]
+Q --&gt; S[Semantic ANN]
+D[Catalog DB] --&gt; L
+X[Vector Index] --&gt; S
 L --&gt; H[Hybrid Ranker]
 S --&gt; H
-H --&gt; R[RAG (optional)\nretrieve best chunks]
+H --&gt; R[RAG optional]
 R --&gt; O[Search response]
 H --&gt; O</code></pre>
 <h2 id="scoring">Scoring<a class="headerlink" href="#scoring" title="Permanent link">#</a></h2>
