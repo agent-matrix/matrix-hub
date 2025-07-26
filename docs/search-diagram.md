@@ -25,7 +25,7 @@ flowchart LR
     R --> O[Response]
     H --> O
   end
-````
+```
 
 ### Implementation Mapping
 
