@@ -76,9 +76,9 @@ help:
 	@echo "  gateway-verify    Verify servers API (scripts/verify_servers.sh)"
 	@echo "  gateway-stop      Stop gateway (scripts/stop-mcp-gateway.sh)"
 	@echo ""
-	@echo "Variables (override like VAR=value make target):"
-	@echo "  HOST=$(HOST) PORT=$(PORT) VENV_DIR=$(VENV_DIR) GATEWAY_HOST=$(GATEWAY_HOST) GATEWAY_PORT=$(GATEWAY_PORT)"
-	@echo ""
+#	@echo "Variables (override like VAR=value make target):"
+#	@echo "  HOST=$(HOST) PORT=$(PORT) VENV_DIR=$(VENV_DIR) GATEWAY_HOST=$(GATEWAY_HOST) GATEWAY_PORT=$(GATEWAY_PORT)"
+#	@echo ""
 
 # -------------------------------------------------------------------
 # Environment setup
