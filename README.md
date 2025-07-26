@@ -12,23 +12,6 @@ It ingests manifests from remote catalogs (e.g., GitHub), provides **search** (l
 
 ---
 
-## Contents
-
-- [Quick start (docker compose)](#quick-start-docker-compose)
-- [Environment](#environment)
-- [API walk‑through](#api-walk-through)
-  - [/health](#get-health)
-  - [/catalog/search](#get-catalogsearch)
-  - [/catalog/entities--id](#get-catalogentitiesid)
-  - [/catalog/install](#post-cataloginstall)
-- [Manifests & Schemas](#manifests--schemas)
-- [Local development](#local-development)
-- [Migrations](#migrations)
-- [Production notes](#production-notes)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
-
----
 
 ## Quick start (docker compose)
 
