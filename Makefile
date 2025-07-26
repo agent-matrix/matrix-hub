@@ -7,28 +7,28 @@ SHELL := /bin/sh
 # -------------------------------------------------------------------
 # Configurable variables (override via environment or on the CLI)
 # -------------------------------------------------------------------
-PY            ?= python3
-VENV_DIR      ?= .venv
-UVICORN       ?= uvicorn
-APP           ?= src.app:app
-HOST          ?= 0.0.0.0
-PORT          ?= 7300
+PY 					?= python3
+VENV_DIR 			?= .venv
+UVICORN 			?= uvicorn
+APP 				?= src.app:app
+HOST 				?= 0.0.0.0
+PORT 				?= 7300
 
-RUFF          ?= ruff
-PYTEST        ?= pytest
-ALEMBIC       ?= alembic
-ALEMBIC_INI   ?= alembic.ini
-MKDOCS        ?= mkdocs
-ENV_FILE      ?= .env
+RUFF 				?= ruff
+PYTEST 				?= pytest
+ALEMBIC 			?= alembic
+ALEMBIC_INI 		?= alembic.ini
+MKDOCS 				?= mkdocs
+ENV_FILE 			?= .env
 
 # Scripts & bash
-BASH          ?= bash
-SCRIPTS_DIR   ?= scripts
+BASH 				?= bash
+SCRIPTS_DIR 		?= scripts
 
 # MCP Gateway convenience
 GATEWAY_PROJECT_DIR ?= mcpgateway
-GATEWAY_HOST        ?= 0.0.0.0
-GATEWAY_PORT        ?= 4444
+GATEWAY_HOST 		?= 0.0.0.0
+GATEWAY_PORT 		?= 4444
 
 # Load variables from .env for each command (if file exists)
 # set -a exports all sourced variables into the environment.
@@ -48,33 +48,33 @@ help:
 	@echo "matrix-hub Makefile"
 	@echo ""
 	@echo "App:"
-	@echo "  setup         Create virtualenv and install all dependencies"
-	@echo "  dev           Run API with auto-reload"
-	@echo "  run           Run API in foreground"
-	@echo "  dev-sh        Run via scripts/run_dev.sh (loads .env, reload)"
-	@echo "  prod-sh       Run via scripts/run_prod.sh (gunicorn/uvicorn)"
+	@echo "  setup           Create virtualenv and install all dependencies"
+	@echo "  dev             Run API with auto-reload"
+	@echo "  run             Run API in foreground"
+	@echo "  dev-sh          Run via scripts/run_dev.sh (loads .env, reload)"
+	@echo "  prod-sh         Run via scripts/run_prod.sh (gunicorn/uvicorn)"
 	@echo ""
 	@echo "Docs:"
-	@echo "  docs          Serve documentation with mkdocs (live reload)"
-	@echo "  build-docs    Build static docs site"
-	@echo "  docs-deploy   Publish docs to GitHub Pages (mkdocs gh-deploy)"
+	@echo "  docs            Serve documentation with mkdocs (live reload)"
+	@echo "  build-docs      Build static docs site"
+	@echo "  docs-deploy     Publish docs to GitHub Pages (mkdocs gh-deploy)"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint          Run Ruff static checks"
-	@echo "  fmt           Auto-fix with Ruff"
-	@echo "  test          Run tests with pytest"
+	@echo "  lint            Run Ruff static checks"
+	@echo "  fmt             Auto-fix with Ruff"
+	@echo "  test            Run tests with pytest"
 	@echo ""
 	@echo "DB (Alembic):"
-	@echo "  migrate       Create Alembic revision (usage: make migrate m=\"msg\")"
-	@echo "  upgrade       Apply Alembic migrations to head"
+	@echo "  migrate         Create Alembic revision (usage: make migrate m=\"msg\")"
+	@echo "  upgrade         Apply Alembic migrations to head"
 	@echo ""
 	@echo "MCP-Gateway (local Python mode):"
-	@echo "  deps                Install OS & Python deps (scripts/install-dependencies.sh)"
-	@echo "  gateway-install     One-shot install & run (scripts/install_mcp_gateway.sh)"
-	@echo "  gateway-setup       Clone/venv/install (scripts/setup-mcp-gateway.sh)"
-	@echo "  gateway-start       Start gateway (scripts/start-mcp-gateway.sh)"
-	@echo "  gateway-verify      Verify servers API (scripts/verify_servers.sh)"
-	@echo "  gateway-stop        Stop gateway (scripts/stop-mcp-gateway.sh)"
+	@echo "  deps            Install OS & Python deps (scripts/install-dependencies.sh)"
+	@echo "  gateway-install   One-shot install & run (scripts/install_mcp_gateway.sh)"
+	@echo "  gateway-setup     Clone/venv/install (scripts/setup-mcp-gateway.sh)"
+	@echo "  gateway-start     Start gateway (scripts/start-mcp-gateway.sh)"
+	@echo "  gateway-verify    Verify servers API (scripts/verify_servers.sh)"
+	@echo "  gateway-stop      Stop gateway (scripts/stop-mcp-gateway.sh)"
 	@echo ""
 	@echo "Variables (override like VAR=value make target):"
 	@echo "  HOST=$(HOST) PORT=$(PORT) VENV_DIR=$(VENV_DIR) GATEWAY_HOST=$(GATEWAY_HOST) GATEWAY_PORT=$(GATEWAY_PORT)"
@@ -174,20 +174,20 @@ deps:
 .PHONY: gateway-install
 gateway-install:
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) HOST=$(GATEWAY_HOST) PORT=$(GATEWAY_PORT) \
-	$(BASH) $(SCRIPTS_DIR)/install_mcp_gateway.sh --non-interactive
+	$(BASH) $(SCRIPTS_DIR)/install_mcp_gateway.sh
 
 .PHONY: gateway-setup
 gateway-setup:
-	@$(BASH) $(SCRIPTS_DIR)/start-mcp-gateway.sh
+	@$(BASH) $(SCRIPTS_DIR)/setup-mcp-gateway.sh
 
 .PHONY: gateway-start
 gateway-start:
-	@$(BASH) $(SCRIPTS_DIR)/2-Start-MCP-Gateway.sh
+	@$(BASH) $(SCRIPTS_DIR)/start-mcp-gateway.sh
 
 .PHONY: gateway-verify
 gateway-verify:
-	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/4-verify_servers.sh
+	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/verify_servers.sh
 
 .PHONY: gateway-stop
 gateway-stop:
-	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/7-Stop-MCP-Gateway.sh
+	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/stop-mcp-gateway.sh
