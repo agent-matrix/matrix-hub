@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "matrix-hub"
+version = "0.1.0"
+description = "Matrix Hub — central catalog & installer service for agents, tools, and MCP servers."
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "agent-matrix", email = "dev@agent-matrix.example" }
+]
+
+# Pin conservatively to stable minor ranges (July 2025).
+# See release references in the notes after this file.
+dependencies = [
+  "fastapi>=0.116,<0.117",
+  "uvicorn[standard]>=0.34,<0.36",
+  "SQLAlchemy>=2.0,<2.1",
+  "psycopg[binary]>=3.2,<3.3",
+  "alembic>=1.16,<2.0",
+  "pydantic-settings>=2.9,<3.0",
+  "httpx>=0.28,<0.29",
+  "APScheduler>=3.10,<4.0",
+  "jsonschema>=4.24,<5.0",
+  "python-dotenv>=1.1,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.2,<9.0",
+  "pytest-asyncio>=0.23,<0.25",
+  "ruff>=0.4,<0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/agent-matrix/matrix-hub"
+Issues = "https://github.com/agent-matrix/matrix-hub/issues"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+exclude = ["tests*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+addopts = "-q"

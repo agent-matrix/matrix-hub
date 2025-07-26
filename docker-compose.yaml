@@ -1,0 +1,42 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    container_name: matrixhub-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-matrix}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-matrix}
+      POSTGRES_DB: ${POSTGRES_DB:-matrixhub}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "5432:5432"
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: matrixhub-app
+    env_file:
+      - .env
+    environment:
+      # Sensible default for local compose; can be overridden from .env
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-7300}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "7300:7300"
+    restart: unless-stopped
+
+volumes:
+  pgdata:

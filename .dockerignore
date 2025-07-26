@@ -1,0 +1,32 @@
+# VCS
+.git
+.gitignore
+
+# Local env & caches
+.env
+__pycache__/
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+pgdata/
+data/
+*.sqlite
+*.db
+
+# Tests are not needed in runtime image
+tests/
+
+# Editor/OS files
+.vscode/
+.idea/
+.DS_Store
+
+# Keep project sources and metadata
+!src/
+!schemas/
+!alembic/
+!pyproject.toml
+!README.md
+!LICENSE

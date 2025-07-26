@@ -1,0 +1,617 @@
+"""
+Installer service for Matrix Hub.
+
+Executes an install plan for a selected catalog entity:
+- Supports artifacts: pypi (uv/pip), oci (docker pull), git (clone), zip (download+extract)
+- Can write project adapters based on manifest 'adapters' entries
+- Can register tools/servers with MCP-Gateway based on 'mcp_registration'
+- Produces a lockfile entry and returns all files written
+
+Design goals:
+- Safe defaults, clear logs, small surface area
+- Idempotent where possible (git clone dir, docker pull is idempotent, pip handled by solver)
+- Best-effort external side-effects; failures are collected and reported
+
+Note on MCP-Gateway:
+- In this gateway, registering an MCP "server" is done via POST /gateways.
+- Our gateway_client.register_server(server_spec) handles that mapping and transport normalization.
+- There is no explicit discovery endpoint; trigger_discovery(...) is a no-op shim for compatibility.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
+
+import httpx
+import yaml
+from sqlalchemy.orm import Session
+
+from ..config import settings
+from ..models import Entity
+
+# Optional dependencies (best-effort usage)
+try:
+    from .adapters import write_adapters  # type: ignore
+except Exception:  # pragma: no cover
+    write_adapters = None  # type: ignore
+
+# Gateway helpers (these are wrappers around the new MCPGatewayClient)
+try:
+    from .gateway_client import (  # type: ignore
+        register_tool,
+        register_server,
+        register_resources,
+        register_prompts,
+        trigger_discovery,
+    )
+except Exception:  # pragma: no cover
+    register_tool = register_server = register_resources = register_prompts = trigger_discovery = None  # type_ignore
+
+log = logging.getLogger("install")
+
+
+# --------------------------------------------------------------------------------------
+# Errors / Result Dataclasses
+# --------------------------------------------------------------------------------------
+
+class InstallError(RuntimeError):
+    """Raised for fatal install errors (invalid entity, missing manifest, etc.)."""
+
+
+@dataclass
+class StepResult:
+    step: str
+    ok: bool
+    returncode: Optional[int] = None
+    stdout: Optional[str] = None
+    stderr: Optional[str] = None
+    elapsed_secs: float = 0.0
+    extra: Dict[str, Any] = None  # populated ad-hoc per step
+
+
+# --------------------------------------------------------------------------------------
+# Public API
+# --------------------------------------------------------------------------------------
+
+def install_entity(
+    db: Session,
+    entity_id: str,
+    version: Optional[str],
+    target: str,
+) -> Dict[str, Any]:
+    """
+    Execute the install for a given entity.
+
+    Args:
+        db: SQLAlchemy session
+        entity_id: Either full uid ("type:name@1.2.3") or short ("type:name")
+        version: Optional version. If provided with short id -> resolves uid = f"{id}@{version}"
+        target: Project directory where adapters and lockfile are written
+
+    Returns:
+        dict: { plan, results, files_written, lockfile }
+    """
+    uid = _resolve_uid(db, entity_id, version)
+
+    entity = db.get(Entity, uid)
+    if not entity:
+        raise InstallError(f"Entity not found: {uid}")
+
+    manifest = _load_manifest(entity)
+    if not manifest:
+        raise InstallError(f"Unable to load manifest for {uid} (source_url missing or fetch failed)")
+
+    # Compute plan
+    plan = _build_install_plan(manifest)
+
+    # Execute plan
+    files_written: List[str] = []
+    results: List[StepResult] = []
+
+    # Ensure target dir exists
+    tdir = Path(target).expanduser().resolve()
+    tdir.mkdir(parents=True, exist_ok=True)
+
+    # Artifacts
+    artifacts: List[dict] = list(manifest.get("artifacts") or [])
+    for idx, art in enumerate(artifacts):
+        kind = (art.get("kind") or "").strip().lower()
+        spec = art.get("spec") or {}
+        step_name = f"artifact[{idx}]:{kind}"
+
+        try:
+            if kind == "pypi":
+                results.append(_install_pypi(spec))
+            elif kind == "oci":
+                results.append(_install_oci(spec))
+            elif kind == "git":
+                results.append(_install_git(spec, tdir))
+            elif kind == "zip":
+                results.append(_install_zip(spec, tdir))
+            else:
+                results.append(
+                    StepResult(step=step_name, ok=False, stderr=f"Unsupported artifact kind: {kind}")
+                )
+        except Exception as e:
+            log.exception("Failed step %s", step_name)
+            results.append(StepResult(step=step_name, ok=False, stderr=str(e)))
+
+    # Adapters
+    adapter_files: List[str] = []
+    try:
+        if write_adapters and manifest.get("adapters"):
+            adapter_files = write_adapters(manifest, target=str(tdir)) or []
+            files_written.extend([_relpath_or_abs(p, tdir) for p in adapter_files])
+            results.append(StepResult(step="adapters.write", ok=True, extra={"count": len(adapter_files)}))
+        else:
+            results.append(StepResult(step="adapters.write", ok=True, extra={"skipped": True}))
+    except Exception as e:
+        log.exception("Adapter writing failed")
+        results.append(StepResult(step="adapters.write", ok=False, stderr=str(e)))
+
+    # MCP-Gateway registration
+    try:
+        reg_res = _maybe_register_gateway(manifest)
+        if reg_res is not None:
+            results.append(StepResult(step="gateway.register", ok=True, extra=reg_res))
+        else:
+            results.append(StepResult(step="gateway.register", ok=True, extra={"skipped": True}))
+    except Exception as e:
+        log.exception("Gateway registration failed")
+        results.append(StepResult(step="gateway.register", ok=False, stderr=str(e)))
+
+    # Lockfile
+    lockfile_data = _build_lockfile(entity, manifest, artifacts)
+    try:
+        lf_path = _write_lockfile(tdir, lockfile_data)
+        files_written.append(_relpath_or_abs(lf_path, tdir))
+        results.append(StepResult(step="lockfile.write", ok=True, extra={"path": str(lf_path)}))
+    except Exception as e:
+        log.exception("Failed to write lockfile")
+        results.append(StepResult(step="lockfile.write", ok=False, stderr=str(e)))
+
+    # Shape response
+    return {
+        "plan": plan,
+        "results": [asdict(r) for r in results],
+        "files_written": files_written,
+        "lockfile": lockfile_data,
+    }
+
+
+# --------------------------------------------------------------------------------------
+# UID Resolution & Manifest Loading
+# --------------------------------------------------------------------------------------
+
+_UID_RE = re.compile(r"^(agent|tool|mcp_server):[^@]+@.+$")
+
+
+def _resolve_uid(db: Session, entity_id: str, version: Optional[str]) -> str:
+    """
+    Convert (entity_id, version) to a full uid.
+
+    Accepts:
+    - entity_id already in uid form: "type:name@1.2.3" -> return as-is
+    - entity_id short "type:name" + version provided -> return "type:name@version"
+
+    We do not try to pick "latest" if version absent for safety.
+    """
+    if _UID_RE.match(entity_id):
+        return entity_id
+    if version:
+        return f"{entity_id}@{version}"
+    # If no version provided and not a uid, we cannot resolve deterministically
+    raise InstallError("Version is required when 'id' is not a full uid (type:name@version).")
+
+
+def _load_manifest(entity: Entity) -> Optional[Dict[str, Any]]:
+    """
+    Fetch and parse the manifest YAML/JSON from entity.source_url.
+    """
+    src = (entity.source_url or "").strip()
+    if not src:
+        return None
+    try:
+        with httpx.Client(timeout=30.0) as c:
+            r = c.get(src)
+            r.raise_for_status()
+            text = r.text
+        # Try YAML first, then JSON
+        try:
+            data = yaml.safe_load(text)
+        except Exception:
+            data = json.loads(text)
+        if not isinstance(data, dict):
+            return None
+        return data
+    except Exception:
+        log.exception("Failed to load manifest from %s", src)
+        return None
+
+
+# --------------------------------------------------------------------------------------
+# Plan builder
+# --------------------------------------------------------------------------------------
+
+def _build_install_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build a transparent, human-readable plan from the manifest.
+    """
+    plan: Dict[str, Any] = {"artifacts": [], "adapters": [], "mcp_registration": {}}
+
+    for art in manifest.get("artifacts") or []:
+        kind = (art.get("kind") or "").strip().lower()
+        spec = art.get("spec") or {}
+        if kind == "pypi":
+            pkg = spec.get("package") or ""
+            ver = spec.get("version") or ""
+            plan["artifacts"].append({"kind": "pypi", "command": _pip_cmd_preview(pkg, ver)})
+        elif kind == "oci":
+            img = spec.get("image") or ""
+            tag = spec.get("tag") or ""
+            dig = spec.get("digest") or ""
+            ref = f"{img}@{dig}" if dig else f"{img}:{tag}" if tag else img
+            plan["artifacts"].append({"kind": "oci", "command": f"docker pull {ref}".strip()})
+        elif kind == "git":
+            repo = spec.get("repo") or ""
+            ref = spec.get("ref") or spec.get("branch") or spec.get("tag") or ""
+            plan["artifacts"].append({"kind": "git", "command": f"git clone {repo} --branch {ref} <target_dir>" if ref else f"git clone {repo} <target_dir>"})
+        elif kind == "zip":
+            url = spec.get("url") or ""
+            plan["artifacts"].append({"kind": "zip", "command": f"curl -L {url} -o /tmp/pkg.zip && unzip /tmp/pkg.zip -d <target_dir>"})
+        else:
+            plan["artifacts"].append({"kind": kind, "note": "unsupported"})
+
+    if manifest.get("adapters"):
+        plan["adapters"] = list(manifest["adapters"])
+
+    if manifest.get("mcp_registration"):
+        plan["mcp_registration"] = manifest["mcp_registration"]
+
+    return plan
+
+
+def _pip_cmd_preview(pkg: str, ver: str) -> str:
+    if shutil.which("uv"):
+        pkg_spec = f"{pkg}{ver}" if ver else pkg
+        return f"uv pip install --system --no-cache-dir {pkg_spec}"
+    # Fallback
+    pkg_spec = f"{pkg}{ver}" if ver else pkg
+    return f"pip install --no-cache-dir {pkg_spec}"
+
+
+# --------------------------------------------------------------------------------------
+# Artifact installers
+# --------------------------------------------------------------------------------------
+
+def _install_pypi(spec: Dict[str, Any]) -> StepResult:
+    pkg = (spec.get("package") or "").strip()
+    ver = (spec.get("version") or "").strip()  # e.g. "==1.4.2" or ">=1.0,<2"
+    if not pkg:
+        return StepResult(step="pypi", ok=False, stderr="missing spec.package")
+
+    pkg_spec = f"{pkg}{ver}" if ver else pkg
+
+    if shutil.which("uv"):
+        cmd = ["uv", "pip", "install", "--system", "--no-cache-dir", pkg_spec]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", pkg_spec]
+
+    return _run_cmd("pypi", cmd, timeout=1800)
+
+
+def _install_oci(spec: Dict[str, Any]) -> StepResult:
+    img = (spec.get("image") or "").strip()
+    tag = (spec.get("tag") or "").strip()
+    dig = (spec.get("digest") or "").strip()
+
+    if not img:
+        return StepResult(step="oci", ok=False, stderr="missing spec.image")
+
+    if not shutil.which("docker"):
+        return StepResult(step="oci", ok=False, stderr="docker not available in PATH")
+
+    ref = f"{img}@{dig}" if dig else f"{img}:{tag}" if tag else img
+    cmd = ["docker", "pull", ref]
+    return _run_cmd("oci", cmd, timeout=1800, redact=[ref])
+
+
+def _install_git(spec: Dict[str, Any], target_dir: Path) -> StepResult:
+    repo = (spec.get("repo") or "").strip()
+    ref = (spec.get("ref") or spec.get("branch") or spec.get("tag") or "").strip()
+    subdir = (spec.get("dest") or spec.get("directory") or "").strip()
+    if not repo:
+        return StepResult(step="git", ok=False, stderr="missing spec.repo")
+
+    if not shutil.which("git"):
+        return StepResult(step="git", ok=False, stderr="git not available in PATH")
+
+    dest = target_dir / "vendor"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    # Folder name from repo
+    folder = _safe_folder_name(Path(repo).stem or "repo")
+    if subdir:
+        folder = subdir
+
+    clone_path = _safe_join(dest, folder)
+    if clone_path.exists():
+        # best-effort: git fetch + checkout if ref given
+        if ref:
+            cmd = ["git", "-C", str(clone_path), "fetch", "--all", "--tags"]
+            fetch_res = _run_cmd("git.fetch", cmd, timeout=600)
+            if not fetch_res.ok:
+                return fetch_res
+            cmd = ["git", "-C", str(clone_path), "checkout", ref]
+            co_res = _run_cmd("git.checkout", cmd, timeout=600)
+            return co_res
+        return StepResult(step="git", ok=True, extra={"path": str(clone_path), "skipped": "exists"})
+    else:
+        cmd = ["git", "clone", repo, str(clone_path)]
+        res = _run_cmd("git.clone", cmd, timeout=1800, redact=[repo])
+        if res.ok and ref:
+            cmd2 = ["git", "-C", str(clone_path), "checkout", ref]
+            res2 = _run_cmd("git.checkout", cmd2, timeout=600)
+            if not res2.ok:
+                return res2
+        return res
+
+
+def _install_zip(spec: Dict[str, Any], target_dir: Path) -> StepResult:
+    url = (spec.get("url") or "").strip()
+    if not url:
+        return StepResult(step="zip", ok=False, stderr="missing spec.url")
+
+    digest = (spec.get("digest") or "").strip()
+    subfolder = (spec.get("dest") or "vendor_zip").strip()
+
+    dest = _safe_join(target_dir, subfolder)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    start = time.perf_counter()
+    try:
+        with httpx.Client(timeout=60.0) as c:
+            r = c.get(url)
+            r.raise_for_status()
+            content = r.content
+        if digest:
+            algo, _, hexval = digest.partition(":")
+            algo = (algo or "sha256").lower()
+            computed = hashlib.new(algo, content).hexdigest()
+            if computed.lower() != (hexval or "").lower():
+                return StepResult(
+                    step="zip",
+                    ok=False,
+                    stderr=f"digest mismatch: expected {digest}, got {algo}:{computed}",
+                    elapsed_secs=time.perf_counter() - start,
+                )
+        # Write temp and unzip
+        import zipfile
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".zip") as tmp:
+            tmp.write(content)
+            tmp_path = Path(tmp.name)
+        with zipfile.ZipFile(tmp_path, "r") as zf:
+            zf.extractall(dest)
+        tmp_path.unlink(missing_ok=True)
+        return StepResult(
+            step="zip", ok=True, elapsed_secs=time.perf_counter() - start, extra={"path": str(dest)}
+        )
+    except Exception as e:
+        log.exception("zip install failed")
+        return StepResult(step="zip", ok=False, stderr=str(e), elapsed_secs=time.perf_counter() - start)
+
+
+# --------------------------------------------------------------------------------------
+# MCP-Gateway registration (best-effort)
+# --------------------------------------------------------------------------------------
+
+def _normalize_mcp_registration(reg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Light normalization to keep Gateway happy without burdening catalog authors:
+      - tool.integration_type: allow 'HTTP' as an alias for 'REST'
+      - tool.inputSchema → tool.input_schema (alias)
+      - server.transport: uppercase (client maps to gateway transports)
+    """
+    out = dict(reg)
+
+    tool = out.get("tool")
+    if isinstance(tool, dict):
+        itype = (tool.get("integration_type") or "").upper()
+        if itype == "HTTP":  # alias for REST
+            tool["integration_type"] = "REST"
+        elif itype in {"REST", "MCP"}:
+            tool["integration_type"] = itype or "REST"
+        else:
+            # default to REST if unspecified/unknown
+            tool["integration_type"] = "REST"
+
+        if "input_schema" not in tool and "inputSchema" in tool:
+            tool["input_schema"] = tool.get("inputSchema")
+
+    server = out.get("server")
+    if isinstance(server, dict):
+        if "transport" in server and isinstance(server["transport"], str):
+            server["transport"] = server["transport"].upper()
+
+    return out
+
+
+def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    reg_raw = manifest.get("mcp_registration") or {}
+    if not reg_raw:
+        return None
+
+    reg = _normalize_mcp_registration(reg_raw)
+    results: Dict[str, Any] = {}
+
+    # Tool
+    tool = reg.get("tool")
+    if tool and register_tool:
+        try:
+            resp = register_tool(tool)  # POST /tools
+            results["tool"] = resp
+        except Exception as e:
+            results["tool_error"] = str(e)
+
+    # Server (Gateway)
+    server = reg.get("server")
+    if server and register_server:
+        try:
+            resp = register_server(server)  # POST /gateways (via client)
+            results["server"] = resp
+            if trigger_discovery:
+                try:
+                    disc = trigger_discovery(resp)  # no-op shim
+                    results["server_discovery"] = disc
+                except Exception as e:
+                    results["server_discovery_error"] = str(e)
+        except Exception as e:
+            results["server_error"] = str(e)
+
+    # Resources
+    resources = reg.get("resources") or []
+    if resources and register_resources:
+        try:
+            resp = register_resources(resources)  # POST /resources (per item)
+            results["resources"] = resp
+        except Exception as e:
+            results["resources_error"] = str(e)
+
+    # Prompts
+    prompts = reg.get("prompts") or []
+    if prompts and register_prompts:
+        try:
+            resp = register_prompts(prompts)  # POST /prompts (per item)
+            results["prompts"] = resp
+        except Exception as e:
+            results["prompts_error"] = str(e)
+
+    return results
+
+
+# --------------------------------------------------------------------------------------
+# Lockfile
+# --------------------------------------------------------------------------------------
+
+def _build_lockfile(entity: Entity, manifest: Dict[str, Any], artifacts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    return {
+        "version": 1,
+        "entities": [
+            {
+                "id": entity.uid,
+                "type": entity.type,
+                "name": entity.name,
+                "version": entity.version,
+                "artifacts": artifacts,
+                "provenance": {
+                    "source_url": entity.source_url,
+                },
+                "adapters": list(manifest.get("adapters") or []),
+            }
+        ],
+    }
+
+
+def _write_lockfile(target_dir: Path, data: Dict[str, Any]) -> Path:
+    lf = target_dir / "matrix.lock.json"
+    # Merge if exists: naive overwrite for MVP
+    lf.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    return lf
+
+
+# --------------------------------------------------------------------------------------
+# Process helpers
+# --------------------------------------------------------------------------------------
+
+def _run_cmd(
+    step: str,
+    cmd: List[str],
+    *,
+    timeout: int = 1800,
+    cwd: Optional[Path] = None,
+    env: Optional[Dict[str, str]] = None,
+    redact: Optional[Iterable[str]] = None,
+) -> StepResult:
+    start = time.perf_counter()
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd else None,
+            env={**os.environ, **(env or {})},
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout,
+            text=True,
+            check=False,
+        )
+        stdout = _truncate(proc.stdout)
+        stderr = _truncate(proc.stderr)
+        rc = proc.returncode
+        ok = rc == 0
+        # avoid leaking secrets in logs/outputs
+        if redact:
+            for needle in redact:
+                if needle:
+                    stdout = stdout.replace(needle, "****")
+                    stderr = stderr.replace(needle, "****")
+        return StepResult(
+            step=step,
+            ok=ok,
+            returncode=rc,
+            stdout=stdout,
+            stderr=stderr,
+            elapsed_secs=time.perf_counter() - start,
+        )
+    except subprocess.TimeoutExpired:
+        return StepResult(step=step, ok=False, stderr="timeout", elapsed_secs=time.perf_counter() - start)
+    except Exception as e:
+        return StepResult(step=step, ok=False, stderr=str(e), elapsed_secs=time.perf_counter() - start)
+
+
+def _truncate(s: Optional[str], limit: int = 64_000) -> Optional[str]:
+    if s is None:
+        return None
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"\n... [truncated {len(s)-limit} bytes]"
+
+
+# --------------------------------------------------------------------------------------
+# Paths & safety
+# --------------------------------------------------------------------------------------
+
+def _safe_folder_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "-", name).strip(".")
+    return cleaned or "pkg"
+
+
+def _safe_join(base: Path, *parts: str) -> Path:
+    p = (base / Path(*parts)).resolve()
+    if not str(p).startswith(str(base.resolve())):
+        raise InstallError("Path traversal detected")
+    return p
+
+
+def _relpath_or_abs(p: Path | str, base: Path) -> str:
+    pth = Path(p)
+    try:
+        return str(pth.resolve().relative_to(base.resolve()))
+    except Exception:
+        return str(pth)
+
+
+# --------------------------------------------------------------------------------------
+# End
+# --------------------------------------------------------------------------------------

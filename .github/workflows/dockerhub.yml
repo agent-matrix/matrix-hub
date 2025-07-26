@@ -1,0 +1,97 @@
+name: 📦 Publish Docker (Docker Hub)
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release tag (e.g., v1.2.3 or 1.2.3)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dockerhub-publish
+  cancel-in-progress: true
+
+jobs:
+  build-and-push:
+    name: Build & Push (Docker Hub)
+    runs-on: ubuntu-latest
+
+    env:
+      IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/matrix-hub
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Derive release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            RAW="${GITHUB_REF#refs/tags/}"
+          else
+            RAW="${{ github.event.inputs.version }}"
+          fi
+          # Normalize: SEMVER without leading v, RELEASE_TAG always prefixed with v
+          if [[ "$RAW" =~ ^v ]]; then
+            echo "RELEASE_TAG=$RAW" >> $GITHUB_ENV
+            echo "SEMVER=${RAW#v}" >> $GITHUB_ENV
+          else
+            echo "RELEASE_TAG=v$RAW" >> $GITHUB_ENV
+            echo "SEMVER=$RAW" >> $GITHUB_ENV
+          fi
+          echo "Resolved RELEASE_TAG=${RELEASE_TAG}, SEMVER=${SEMVER}"
+
+      - name: Set up QEMU (multi-arch)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Docker Hub login
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Docker metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=v${{ env.SEMVER }}
+            type=semver,pattern={{version}},value=${{ env.SEMVER }}
+            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER }}
+            type=semver,pattern={{major}},value=${{ env.SEMVER }}
+          labels: |
+            org.opencontainers.image.title=matrix-hub
+            org.opencontainers.image.description=Matrix Hub — central catalog & installer for agents, tools, and MCP servers
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.SEMVER }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build & push (Docker Hub)
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Inspect multi-arch manifest
+        run: |
+          docker buildx imagetools inspect ${{ env.IMAGE }}:${{ env.SEMVER }}

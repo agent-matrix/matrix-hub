@@ -1,0 +1,189 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://matrix-hub/schemas/tool.manifest.schema.json",
+  "title": "Matrix Hub — Tool Manifest",
+  "description": "Schema for a standalone Tool published to Matrix Hub. Requires MCP registration info for the tool. Tight but permissive: unknown fields are allowed.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "schema_version",
+    "type",
+    "id",
+    "name",
+    "version",
+    "description",
+    "artifacts",
+    "license",
+    "mcp_registration"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Schema version number for this manifest format."
+    },
+    "type": {
+      "const": "tool",
+      "description": "Constant literal identifying this manifest as a Tool."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "description": "Stable identifier (scoped within type). Keep to lowercase letters, digits, dot, underscore, or dash."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-friendly name for the tool."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)*([-.][0-9A-Za-z.]+)?$",
+      "description": "Version string (SemVer-like preferred, but not strictly enforced)."
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short, one-paragraph summary of what the tool does."
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Long-form description of the tool, usage and behavior."
+    },
+    "license": {
+      "type": "string",
+      "description": "Project license identifier or text (SPDX string preferred)."
+    },
+    "homepage": {
+      "type": "string",
+      "format": "uri",
+      "description": "Homepage URL for the tool/project."
+    },
+    "source_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Source repository URL (e.g., GitHub)."
+    },
+    "capabilities": {
+      "type": "array",
+      "description": "List of capability tags that describe what the tool can do.",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": []
+    },
+    "tags": {
+      "type": "array",
+      "description": "Additional free-form tags.",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true,
+      "default": []
+    },
+    "compatibility": {
+      "type": "object",
+      "description": "Compatibility hints indicating supported frameworks and providers.",
+      "additionalProperties": true,
+      "properties": {
+        "frameworks": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "default": []
+        },
+        "providers": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true,
+          "default": []
+        },
+        "runtime": {
+          "type": "string",
+          "description": "Optional runtime environment hint (e.g., python3.11)."
+        },
+        "min_version": {
+          "type": "string",
+          "description": "Optional minimum supported version of a primary dependency/framework."
+        },
+        "max_version": {
+          "type": "string",
+          "description": "Optional maximum supported version of a primary dependency/framework."
+        }
+      },
+      "default": {}
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Installable artifacts for the tool (PyPI package, OCI image, git repo, or zip).",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+    "readme": {
+      "type": "string",
+      "description": "Optional README content inlined into the manifest (Markdown/plaintext)."
+    },
+    "readme_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional URL to README content."
+    },
+    "examples": {
+      "type": "array",
+      "description": "Optional usage examples (free-form text).",
+      "items": { "type": "string" },
+      "default": []
+    },
+    "mcp_registration": {
+      "type": "object",
+      "description": "MCP registration details for this tool.",
+      "additionalProperties": true,
+      "required": ["tool"],
+      "properties": {
+        "tool": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name", "integration_type", "request_type", "url", "input_schema"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "integration_type": { "type": "string", "enum": ["REST", "HTTP", "MCP"] },
+            "request_type": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+            "url": { "type": "string", "format": "uri" },
+            "input_schema": { "type": "object", "additionalProperties": true },
+            "description": { "type": "string" },
+            "annotations": { "type": "object", "additionalProperties": true }
+          }
+        }
+      }
+    },
+    "sig_uri": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional signature metadata URI (e.g., for cosign/Sigstore)."
+    },
+    "sbom_uri": {
+      "type": "string",
+      "format": "uri",
+      "description": "Optional SBOM metadata URI."
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "spec"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["pypi", "oci", "git", "zip", "other"],
+          "description": "Artifact type to install."
+        },
+        "spec": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true,
+          "description": "Artifact-specific spec. Common keys: package/version (pypi), image/tag/digest (oci), repo/ref (git), url/digest (zip)."
+        },
+        "sig_uri": { "type": "string", "format": "uri" },
+        "sbom_uri": { "type": "string", "format": "uri" }
+      }
+    }
+  }
+}

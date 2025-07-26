@@ -1,0 +1,67 @@
+site_name: Matrix Hub
+site_description: Central catalog & installer for agents, tools, and MCP servers
+site_author: agent-matrix
+site_url: https://agent-matrix.github.io/matrix-hub/
+repo_name: agent-matrix/matrix-hub
+repo_url: https://github.com/agent-matrix/matrix-hub
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+    - search.highlight
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: "#"
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji
+
+nav:
+  - Overview: index.md
+  - Quickstart: quickstart.md
+  - Configuration: configuration.md
+  - API:
+      - Endpoints: api.md
+  - Catalog:
+      - Ingestion: ingestion.md
+      - Manifests: manifests.md
+  - Search: search.md
+  - Install & Registration: install-and-registration.md
+  - Architecture: architecture.md
+  - Deployment: deployment.md
+  - Development: development.md
+  - Security: security.md
+  - Observability: observability.md
+  - FAQ: faq.md
+  - Changelog: changelog.md
