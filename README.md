@@ -9,6 +9,7 @@
 [![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
 [![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+<a href="https://github.com/ruslanmv/agent-generator"><img src="https://img.shields.io/badge/Powered%20by-agent--generator-brightgreen" alt="Powered by agent-generator"></a>
 
 Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 
