@@ -39,6 +39,34 @@ You should see:
 ```
 The app container waits for Postgres to be healthy, then starts the API. Ingest is scheduled (see INGEST_INTERVAL_MIN in .env).
 
+## Architecture
+
+```mermaid
+flowchart LR
+    subgraph Ingest & Index Pluggable
+        G[GitHub Ingestor\nmanifests + READMEs] --> N[Normalizer\nvalidate + enrich + version]
+        N --> D[Catalog DB\nPostgres]
+        N --> C[Chunker\nname/desc/README/examples]
+        C --> E[Embedder\nmodel: MiniLM/*; Workers: in-process or Celery]
+        E --> V[Vector Index\npgvector ⟶ Milvus later]
+        N --> B[BlobStore\nlocal disk ⟶ S3/MinIO later]
+    end
+
+    subgraph Query & Rank Stable API
+        U[User query + filters] --> S[/GET /catalog/search/]
+        S --> L[Lexical\npg_trgm BM25 ⟶ OpenSearch later]
+        S --> Q[Vector ANN\npgvector ⟶ Milvus later]
+        D --> L
+        V --> Q
+        L --> H[Hybrid Ranker\nweights in config]
+        Q --> H
+        H -->|top‑K| R[RAG optional\nfetch best chunks from BlobStore + summarize fit]
+        R --> O[JSON response: items + scores + fit_reason]
+        H --> O
+    end
+```
+
+
 ## Environment
 
 All configuration is via environment variables; see `.env.example` for a documented template.
