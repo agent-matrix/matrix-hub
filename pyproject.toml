@@ -26,6 +26,8 @@ dependencies = [
   "APScheduler>=3.10,<4.0",
   "jsonschema>=4.24,<5.0",
   "python-dotenv>=1.1,<2.0",
+  "aiosqlite>=0.21.0",
+  "greenlet>=3.2.3"
 ]
 
 [project.optional-dependencies]

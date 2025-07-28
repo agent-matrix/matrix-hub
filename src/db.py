@@ -1,3 +1,4 @@
+#src/db.py
 """
 Database bootstrap for Matrix Hub.
 
@@ -12,39 +13,44 @@ import logging
 from contextlib import contextmanager
 from typing import Generator, Optional
 
-from sqlalchemy import text
+from sqlalchemy import text, create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy import create_engine
 
 from .config import settings
 
 log = logging.getLogger("db")
 
 _engine: Optional[Engine] = None
-SessionLocal: sessionmaker[Session]  # initialized in init_db()
+
+# IMPORTANT: Bind a dummy SessionLocal at import time so
+# `from src.db import SessionLocal` never fails.
+SessionLocal: sessionmaker[Session] = sessionmaker(class_=Session, future=True)
 
 
 def _build_engine() -> Engine:
     db_url = settings.DATABASE_URL
 
-    # SQLite needs special connect args in many cases; leave others default
+    # SQLite needs special connect args; others can use defaults.
     connect_args = {}
     if db_url.startswith("sqlite:///") or db_url.startswith("sqlite://"):
-        # For single-threaded SQLite usage in FastAPI, this relaxes thread check.
         connect_args["check_same_thread"] = False
 
-    engine = create_engine(
-        db_url,
-        echo=settings.SQL_ECHO,
-        pool_pre_ping=settings.DB_POOL_PRE_PING,
-        pool_size=settings.DB_POOL_SIZE if not db_url.startswith("sqlite") else None,
-        max_overflow=settings.DB_MAX_OVERFLOW if not db_url.startswith("sqlite") else None,
-        connect_args=connect_args,
-        future=True,
-    )
-    return engine
+    # Build kwargs conditionally to avoid passing None for pool params.
+    kwargs: dict = {
+        "echo": settings.SQL_ECHO,
+        "pool_pre_ping": settings.DB_POOL_PRE_PING,
+        "connect_args": connect_args,
+        "future": True,
+    }
+    if not db_url.startswith("sqlite"):
+        kwargs.update(
+            pool_size=settings.DB_POOL_SIZE,
+            max_overflow=settings.DB_MAX_OVERFLOW,
+        )
+
+    return create_engine(db_url, **kwargs)
 
 
 def init_db() -> None:
@@ -53,6 +59,7 @@ def init_db() -> None:
 
     if _engine is None:
         _engine = _build_engine()
+        # Recreate SessionLocal bound to the engine.
         SessionLocal = sessionmaker(
             autocommit=False,
             autoflush=False,
@@ -64,10 +71,11 @@ def init_db() -> None:
 
     # Simple connectivity check
     try:
-        with _engine.connect() as conn:  # type: ignore[union-attr]
+        assert _engine is not None
+        with _engine.connect() as conn:
             conn.execute(text("SELECT 1"))
         log.info("Database connectivity OK.")
-    except SQLAlchemyError as exc:
+    except SQLAlchemyError:
         log.exception("Database connectivity check failed.")
         # Bubble up to stop app startup (handled by app.lifespan)
         raise
@@ -81,7 +89,7 @@ def close_db() -> None:
             _engine.dispose()
         finally:
             _engine = None
-            # Rebind a dummy SessionLocal to avoid NameError if imported elsewhere
+            # Rebind an unbound SessionLocal (import-safe)
             SessionLocal = sessionmaker(class_=Session, future=True)
             log.info("SQLAlchemy engine disposed.")
 

@@ -11,7 +11,7 @@ Returns Pydantic DTOs defined in src/schemas.py.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -22,9 +22,26 @@ from ..models import Entity
 from .. import schemas
 
 # Search plumbing (interfaces + backends)
-# These modules are the simple stubs/backends we outlined earlier.
-from ..services.search import ranker, rag, reranker, util  # type: ignore
-from ..services.search.backends import lexical, vector, embedder, blobstore  # type: ignore
+from ..services.search import ranker, util  # type: ignore
+
+# Import search backends directly from the factory singletons
+from ..services.search import (  # type: ignore
+    lexical_backend as lexical,
+    vector_backend as vector,
+    embedder,
+    blobstore,
+)
+
+# Optional RAG and reranker (guarded)
+try:  # pragma: no cover
+    from ..services.search import rag  # type: ignore
+except Exception:  # pragma: no cover
+    rag = None  # type: ignore
+
+try:  # pragma: no cover
+    from ..services.search import reranker  # type: ignore
+except Exception:  # pragma: no cover
+    reranker = None  # type: ignore
 
 # Installer service
 from ..services import install  # type: ignore
@@ -55,6 +72,24 @@ def _parse_filters(
     }
 
 
+def _maybe_rerank(query: str, hits: List[Dict[str, Any]], algo: schemas.RerankMode) -> List[Dict[str, Any]]:
+    if reranker and hasattr(reranker, "rerank"):
+        try:
+            return reranker.rerank(query, hits, algo=algo)  # type: ignore[attr-defined]
+        except Exception:
+            return hits
+    return hits
+
+
+def _maybe_add_fit_reasons(query: str, hits: List[Dict[str, Any]]) -> None:
+    if rag and hasattr(rag, "add_fit_reasons"):  # type: ignore[attr-defined]
+        try:
+            rag.add_fit_reasons(query, hits, blobstore)  # type: ignore[attr-defined]
+        except Exception:
+            # Soft-fail; fit reasons are optional
+            return
+
+
 # ----------- Routes -----------
 
 @router.get(
@@ -76,25 +111,42 @@ def search_catalog(
 ) -> schemas.SearchResponse:
     filters = _parse_filters(type, capabilities, frameworks, providers)
 
-    lex_hits = []
-    vec_hits = []
     # Lexical (BM25/pg_trgm) unless semantic-only
+    lex_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.semantic:
-        lex_hits = lexical.search(q=q, filters=filters, k=max(limit, 50), db=db)
+        lex_hits = lexical.search(
+            q,
+            type=filters["type"] or None,
+            capabilities=filters["capabilities"],
+            frameworks=filters["frameworks"],
+            providers=filters["providers"],
+            limit=max(limit, 50),
+            db=db,  # backends may ignore this if not needed
+        )
 
     # Vector (ANN) unless keyword-only
+    vec_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.keyword:
         q_vec = embedder.encode([q])[0]
-        vec_hits = vector.search(q_vector=q_vec, filters=filters, k=max(limit, 50), db=db)
+        vec_hits = vector.search(
+            q_vec,
+            type=filters["type"] or None,
+            capabilities=filters["capabilities"],
+            frameworks=filters["frameworks"],
+            providers=filters["providers"],
+            limit=max(limit, 50),
+            db=db,
+        )
 
     # Blend + scoring
     merged = ranker.merge_and_score(lex_hits, vec_hits)
+
     # Optional rerank (top-50 → top-N)
-    top_hits = reranker.rerank(q, merged[: max(limit, 50)], algo=rerank_mode)[:limit]
+    top_hits = _maybe_rerank(q, merged[: max(limit, 50)], rerank_mode)[:limit]
 
     # Optional RAG reasons (short, cached)
     if with_rag:
-        rag.add_fit_reasons(q, top_hits, blobstore)
+        _maybe_add_fit_reasons(q, top_hits)
 
     # Serialize to DTOs; util.serialize_hit can attach entity fields if needed
     items = [schemas.SearchItem(**util.serialize_hit(h, db=db)) for h in top_hits]
@@ -163,7 +215,7 @@ def install_entity(
             detail={"error": "InstallError", "reason": str(exc)},
         ) from exc
 
-    # Expect result to be a dataclass/dict with plan, results, files_written, lockfile
+    # Expect result to be a dict with plan, results, files_written, lockfile
     return schemas.InstallResponse(
         plan=result.get("plan"),
         results=result.get("results"),

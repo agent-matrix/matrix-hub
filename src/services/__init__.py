@@ -1,3 +1,4 @@
+# src/services/__init__.py
 """
 Services package marker.
 
@@ -21,14 +22,18 @@ def set_service(name: str, value: Any) -> None:
     _registry[name] = value
 
 
-# Re-export search singletons for convenience
+# Optional re-exports (do NOT import config here; avoid init-time loops)
 try:
-    from .search import (  # type: ignore
+    from .search import (  # noqa: F401
         get_lexical_backend,
         get_vector_backend,
         get_embedder,
         get_blobstore,
+        lexical_backend,
+        vector_backend,
+        embedder,
+        blobstore,
     )
-except Exception:  # pragma: no cover
-    # If search isn't fully wired in a given environment, keep imports optional
+except Exception:
+    # Keep package importable even if search backends aren't wired yet
     pass

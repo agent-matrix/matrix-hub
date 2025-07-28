@@ -41,6 +41,21 @@ ALEMBIC_CFG := $(if $(wildcard $(ALEMBIC_INI)),-c $(ALEMBIC_INI),)
 activate = . $(VENV_DIR)/bin/activate
 
 # -------------------------------------------------------------------
+# Ensure .env exists (copy from .env.example if missing)
+# -------------------------------------------------------------------
+.PHONY: ensure-env
+ensure-env:
+	@# Ensure $(ENV_FILE) exists in the project root; if not, copy from $(ENV_FILE).example
+	@if [ ! -f $(ENV_FILE) ]; then \
+		if [ -f $(ENV_FILE).example ]; then \
+			cp $(ENV_FILE).example $(ENV_FILE); \
+			echo "Created $(ENV_FILE) from $(ENV_FILE).example"; \
+		else \
+			echo "Warning: $(ENV_FILE) not found and no $(ENV_FILE).example to copy."; \
+		fi; \
+	fi
+
+# -------------------------------------------------------------------
 # Help
 # -------------------------------------------------------------------
 .PHONY: help
@@ -95,13 +110,13 @@ setup:
 # App
 # -------------------------------------------------------------------
 .PHONY: dev
-dev: setup
+dev: setup ensure-env
 	@$(ENV) \
 	$(activate) && \
 	$(UVICORN) $(APP) --reload --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
 
 .PHONY: run
-run: setup
+run: setup ensure-env
 	@$(ENV) \
 	$(activate) && \
 	$(UVICORN) $(APP) --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
@@ -118,17 +133,17 @@ prod-sh:
 # Documentation
 # -------------------------------------------------------------------
 .PHONY: docs
-docs: setup
+docs: setup ensure-env
 	@$(ENV) \
 	$(activate) && \
 	$(MKDOCS) serve --dev-addr="$${HOST:-$(HOST)}:$${PORT:-$(PORT)}"
 
 .PHONY: build-docs
-build-docs: setup
+build-docs: setup ensure-env
 	@$(activate) && $(MKDOCS) build
 
 .PHONY: docs-deploy
-docs-deploy: setup
+docs-deploy: setup ensure-env
 	@$(activate) && $(MKDOCS) gh-deploy --force
 
 # -------------------------------------------------------------------
@@ -146,7 +161,7 @@ fmt:
 # Tests
 # -------------------------------------------------------------------
 .PHONY: test
-test: setup
+test: setup ensure-env
 	@$(ENV) \
 	$(activate) && $(PYTEST) -q
 
@@ -154,13 +169,13 @@ test: setup
 # Database migrations (Alembic)
 # -------------------------------------------------------------------
 .PHONY: migrate
-migrate: setup
+migrate: setup ensure-env
 	@[ -n "$(m)" ] || (echo "Usage: make migrate m=\"your message\""; exit 2)
 	@$(ENV) \
 	$(activate) && $(ALEMBIC) $(ALEMBIC_CFG) revision --autogenerate -m "$(m)"
 
 .PHONY: upgrade
-upgrade: setup
+upgrade: setup ensure-env
 	@$(ENV) \
 	$(activate) && $(ALEMBIC) $(ALEMBIC_CFG) upgrade head
 

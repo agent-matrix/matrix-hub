@@ -39,3 +39,4 @@ Thumbs.db
 /mcpgateway
 /site
 .env.gateway.local
+/temp

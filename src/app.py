@@ -1,3 +1,4 @@
+#src/app.py
 """
 Matrix Hub — FastAPI application entrypoint.
 
@@ -124,7 +125,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start the ingest scheduler (APScheduler-based)
     try:
-        app.state.scheduler = ingest_scheduler.start_scheduler()
+#        app.state.scheduler = ingest_scheduler.start_scheduler()
+        app.state.scheduler = ingest_scheduler.start_scheduler(app)
+
         log.info("Ingest scheduler started.")
     except Exception:
         log.exception("Failed to start ingest scheduler.")
