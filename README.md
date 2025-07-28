@@ -1,4 +1,4 @@
-<p align="left">
+<p align="center">
   <img src="./assets/logo.png" alt="Matrix Hub Logo" width="300">
 </p>
 
