@@ -1,36 +1,66 @@
 #!/usr/bin/env bash
-# 4-verify_servers.sh
+#
+# verify-servers.sh
+#
+# Verifies that the MCP Gateway is running by minting an admin token
+# and querying the /servers endpoint. It must be run after the main
+# run.sh script has successfully started the gateway.
+
 set -euo pipefail
 
-PROJECT_DIR="${PROJECT_DIR:-./mcpgateway}"
-VENV_ACTIVATE="${PROJECT_DIR}/.venv/bin/activate"
+# --- Configuration & Paths ---
+# Use the same robust path discovery as the main run.sh script
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BASE_DIR="$(dirname "${SCRIPT_DIR}")"
+PROJECT_DIR="${BASE_DIR}/mcpgateway"
+VENV_DIR="${PROJECT_DIR}/.venv"
 ENV_FILE="${PROJECT_DIR}/.env"
 
-[ -f "${VENV_ACTIVATE}" ] || { echo "❌ venv not found at ${VENV_ACTIVATE}" >&2; exit 1; }
+# --- Helper Functions ---
+log() { printf "\n[$(date +'%T')] %s\n" "$*"; }
+die() { printf "\nERROR: %s\n" "$*" >&2; exit 1; }
+
+# --- Script Execution ---
+log "### Verifying MCP Gateway Servers ###"
+
+# 1. Activate Virtual Environment
+if [ ! -f "${VENV_DIR}/bin/activate" ]; then
+    die "Virtual environment not found at ${VENV_DIR}/bin/activate. Please run the main setup script first."
+fi
 # shellcheck disable=SC1090
-source "${VENV_ACTIVATE}"
+source "${VENV_DIR}/bin/activate"
+log "✅ Virtual environment activated."
 
-[ -f "${ENV_FILE}" ] || { echo "❌ ${ENV_FILE} not found." >&2; exit 1; }
-# shellcheck disable=SC2046
-export $(grep -v '^\s*#' "${ENV_FILE}" | xargs)
+# 2. Load Environment Variables from the correct .env file
+if [ ! -f "${ENV_FILE}" ]; then
+    die ".env file not found at ${ENV_FILE}. Please run the main setup script first."
+fi
+set -o allexport
+# shellcheck disable=SC1090
+source "${ENV_FILE}"
+set +o allexport
+log "✅ Environment variables loaded from ${ENV_FILE}."
 
-HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-4444}"
+# 3. Mint an Admin JWT
+local_host="127.0.0.1" # Use 127.0.0.1 for client connections, not 0.0.0.0
+local_port="${PORT:-4444}"
+auth_user="${BASIC_AUTH_USERNAME:-admin}"
+jwt_secret="${JWT_SECRET_KEY:-my-test-key}" # Provide a sane default
 
-# Backwards-compatible env names
-BASIC_AUTH_USER="${BASIC_AUTH_USER:-${BASIC_AUTH_USERNAME:-admin}}"
-BASIC_AUTH_PASSWORD="${BASIC_AUTH_PASSWORD:-${BASIC_AUTH_PASSWORD:-changeme}}"
-JWT_SECRET_KEY="${JWT_SECRET_KEY:-dev-secret}"
-
-echo "⏳ Minting admin JWT…"
+log "⏳ Minting admin JWT for user '${auth_user}'..."
 ADMIN_TOKEN=$(
-  JWT_SECRET_KEY="$JWT_SECRET_KEY" \
-    python3 -m mcpgateway.utils.create_jwt_token \
-      --username "$BASIC_AUTH_USER" \
-      --secret   "$JWT_SECRET_KEY" \
-      --exp 120
+  python3 -m mcpgateway.utils.create_jwt_token \
+    --username "$auth_user" \
+    --secret   "$jwt_secret" \
+    --exp 120
 )
-echo "✅ Token minted."
+if [ -z "$ADMIN_TOKEN" ]; then
+    die "Failed to mint JWT. Check your credentials and JWT_SECRET_KEY in the .env file."
+fi
+log "✅ Token minted successfully."
 
-echo "⏳ Querying /servers …"
-curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://${HOST}:${PORT}/servers" | jq .
+# 4. Query the /servers endpoint
+log "⏳ Querying active servers from http://${local_host}:${local_port}/servers..."
+if ! curl -sS -H "Authorization: Bearer $ADMIN_TOKEN" "http://${local_host}:${local_port}/servers" | jq .; then
+    die "Failed to query the /servers endpoint. Is the gateway running? Check its logs."
+fi
