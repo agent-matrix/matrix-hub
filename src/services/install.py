@@ -38,7 +38,6 @@ import httpx
 import yaml
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..models import Entity
 
 # Optional dependencies (best-effort usage)

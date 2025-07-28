@@ -25,7 +25,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from jsonschema import Draft202012Validator, ValidationError as JSONSchemaValidationError
 from jsonschema.validators import extend

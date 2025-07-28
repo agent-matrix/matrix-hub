@@ -17,9 +17,8 @@ Usage in routes:
 
 from __future__ import annotations
 
-from typing import Optional
 
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import HTTPException, Request, status
 
 from ..config import settings
 

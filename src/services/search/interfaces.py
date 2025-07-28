@@ -7,7 +7,7 @@ implementations live under `backends/` (e.g., pgtrgm, pgvector).
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Protocol, TypedDict
+from typing import Any, Dict, Iterable, List, Protocol, TypedDict
 
 
 class Hit(TypedDict, total=False):

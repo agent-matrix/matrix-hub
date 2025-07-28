@@ -18,7 +18,6 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from ....config import settings
 from ....models import Entity
 from ..interfaces import Hit
 from ..util import (

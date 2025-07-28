@@ -63,7 +63,8 @@ class LocalBlobStore(BlobStore):
 
     def put_text(self, key: str, text: str) -> str:  # type: ignore[override]
         # Store as a flat file using a sanitized key
-        import re, pathlib
+        import re
+        import pathlib
         safe = re.sub(r"[^A-Za-z0-9._@#-]+", "_", key)
         fpath = pathlib.Path(self.base) / f"{safe}.txt"
         fpath.parent.mkdir(parents=True, exist_ok=True)

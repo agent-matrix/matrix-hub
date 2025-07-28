@@ -8,13 +8,12 @@ Vector backend using pgvector, with a safe no-op fallback when unavailable.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 from sqlalchemy import text, bindparam
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
-from ....models import Entity
 from ..interfaces import Hit
 from ..util import (
     compute_recency_score,

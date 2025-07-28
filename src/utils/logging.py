@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sys
 import time
 from contextvars import ContextVar
@@ -76,7 +75,7 @@ def configure_json_logging(level: str | int = "INFO") -> None:
 # Optional middleware to set/reset context var for FastAPI
 try:
     from starlette.middleware.base import BaseHTTPMiddleware
-    from starlette.types import ASGIApp, Receive, Scope, Send
+    from starlette.types import ASGIApp
     from starlette.requests import Request
     from starlette.responses import Response
 
