@@ -84,16 +84,17 @@ help:
 	@echo "  upgrade         Apply Alembic migrations to head"
 	@echo ""
 	@echo "MCP-Gateway (local Python mode):"
-	@echo "  deps            Install OS & Python deps (scripts/install-dependencies.sh)"
+	@echo "  deps              Install OS & Python deps (scripts/install-dependencies.sh)"
 	@echo "  gateway-install   One-shot install & run (scripts/install_mcp_gateway.sh)"
 	@echo "  gateway-setup     Clone/venv/install (scripts/setup-mcp-gateway.sh)"
 	@echo "  gateway-start     Start gateway (scripts/start-mcp-gateway.sh)"
 	@echo "  gateway-verify    Verify servers API (scripts/verify_servers.sh)"
 	@echo "  gateway-stop      Stop gateway (scripts/stop-mcp-gateway.sh)"
 	@echo ""
-#	@echo "Variables (override like VAR=value make target):"
-#	@echo "  HOST=$(HOST) PORT=$(PORT) VENV_DIR=$(VENV_DIR) GATEWAY_HOST=$(GATEWAY_HOST) GATEWAY_PORT=$(GATEWAY_PORT)"
-#	@echo ""
+	@echo "Container:"
+	@echo "  container-build   Build Docker image (scripts/build_container.sh)"
+	@echo "  container-run     Run Docker container (scripts/run_container.sh)"
+	@echo ""
 
 # -------------------------------------------------------------------
 # Environment setup
@@ -206,3 +207,63 @@ gateway-verify:
 .PHONY: gateway-stop
 gateway-stop:
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/stop-mcp-gateway.sh
+
+# ===================================================================
+# Container image build & run (DO NOT remove/alter existing targets)
+# ===================================================================
+
+# -------- Build-time variables (override as needed) --------
+IMAGE_NAME           ?= matrix-hub
+IMAGE_TAG            ?= latest
+HUB_INSTALL_TARGET   ?= prod      # prod | dev
+SKIP_GATEWAY_SETUP   ?= 0         # 0 | 1
+PLATFORM             ?=
+NO_CACHE             ?= 0         # 0 | 1
+PULL                 ?= 0         # 0 | 1
+BUILDX               ?= 0         # 0 | 1
+
+# -------- Run-time variables (override as needed) ----------
+CONTAINER_NAME       ?= matrix-hub
+APP_HOST_PORT        ?= 7300
+GW_HOST_PORT         ?= 4444
+DATA_VOLUME          ?= matrixhub_data
+GW_VOLUME            ?=           # optional (e.g., mcpgw_data)
+NETWORK_NAME         ?=
+RESTART_POLICY       ?= unless-stopped
+DETACH               ?= 1         # 1=detached, 0=foreground
+PULL_RUNTIME         ?= 0         # docker pull before run
+REPLACE              ?= 1         # stop/remove existing container if present
+GW_SKIP              ?= 0         # 1 to skip embedded gateway
+
+# Build Docker image via scripts/build_container.sh
+.PHONY: container-build
+container-build:
+	@echo "Building container image $(IMAGE_NAME):$(IMAGE_TAG) ..."
+	@$(BASH) $(SCRIPTS_DIR)/build_container.sh \
+		--image "$(IMAGE_NAME)" \
+		--tag "$(IMAGE_TAG)" \
+		$(if $(filter dev,$(HUB_INSTALL_TARGET)),--dev,) \
+		$(if $(filter 1,$(SKIP_GATEWAY_SETUP)),--skip-gateway-setup,) \
+		$(if $(PLATFORM),--platform "$(PLATFORM)",) \
+		$(if $(filter 1,$(NO_CACHE)),--no-cache,) \
+		$(if $(filter 1,$(PULL)),--pull,) \
+		$(if $(filter 1,$(BUILDX)),--buildx,)
+
+# Run Docker container via scripts/run_container.sh
+.PHONY: container-run
+container-run:
+	@echo "Running container $(CONTAINER_NAME) from $(IMAGE_NAME):$(IMAGE_TAG) ..."
+	@$(BASH) $(SCRIPTS_DIR)/run_container.sh \
+		--image "$(IMAGE_NAME)" \
+		--tag "$(IMAGE_TAG)" \
+		--name "$(CONTAINER_NAME)" \
+		--app-port "$(APP_HOST_PORT)" \
+		$(if $(filter 1,$(GW_SKIP)),--skip-gateway,--gw-port "$(GW_HOST_PORT)") \
+		--env-file "$(ENV_FILE)" \
+		--data-volume "$(DATA_VOLUME)" \
+		$(if $(GW_VOLUME),--gw-volume "$(GW_VOLUME)",) \
+		$(if $(NETWORK_NAME),--network "$(NETWORK_NAME)",) \
+		--restart "$(RESTART_POLICY)" \
+		$(if $(filter 1,$(DETACH)),-d,--foreground) \
+		$(if $(filter 1,$(PULL_RUNTIME)),--pull,) \
+		$(if $(filter 0,$(REPLACE)),--no-replace,)
