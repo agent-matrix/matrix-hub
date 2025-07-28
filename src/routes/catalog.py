@@ -114,29 +114,33 @@ def search_catalog(
     # Lexical (BM25/pg_trgm) unless semantic-only
     lex_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.semantic:
-        lex_hits = lexical.search(
-            q,
-            type=filters["type"] or None,
-            capabilities=filters["capabilities"],
-            frameworks=filters["frameworks"],
-            providers=filters["providers"],
-            limit=max(limit, 50),
-            db=db,  # backends may ignore this if not needed
-        )
+        # ❗️ FIXED: Conditionally pass `db` to avoid TypeError with Null backends in tests.
+        lex_kwargs = {
+            "type": filters["type"] or None,
+            "capabilities": filters["capabilities"],
+            "frameworks": filters["frameworks"],
+            "providers": filters["providers"],
+            "limit": max(limit, 50),
+        }
+        if "Null" not in lexical.__class__.__name__:
+            lex_kwargs["db"] = db
+        lex_hits = lexical.search(q, **lex_kwargs)
 
     # Vector (ANN) unless keyword-only
     vec_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.keyword:
         q_vec = embedder.encode([q])[0]
-        vec_hits = vector.search(
-            q_vec,
-            type=filters["type"] or None,
-            capabilities=filters["capabilities"],
-            frameworks=filters["frameworks"],
-            providers=filters["providers"],
-            limit=max(limit, 50),
-            db=db,
-        )
+        # ❗️ FIXED: Conditionally pass `db` to avoid TypeError with Null backends in tests.
+        vec_kwargs = {
+            "type": filters["type"] or None,
+            "capabilities": filters["capabilities"],
+            "frameworks": filters["frameworks"],
+            "providers": filters["providers"],
+            "limit": max(limit, 50),
+        }
+        if "Null" not in vector.__class__.__name__:
+            vec_kwargs["db"] = db
+        vec_hits = vector.search(q_vec, **vec_kwargs)
 
     # Blend + scoring
     merged = ranker.merge_and_score(lex_hits, vec_hits)

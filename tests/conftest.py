@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import Generator, Iterable, List
+from typing import Generator, List
 
 import pytest
 
@@ -28,10 +28,12 @@ import pytest
 # Environment defaults (must be set BEFORE importing application code)
 # ---------------------------------------------------------------------
 # Use a local SQLite file by default for the entire test session.
-os.environ.setdefault("DATABASE_URL", "sqlite+pysqlite:///./ci.sqlite")
+# Using the standard synchronous driver.
+os.environ.setdefault("DATABASE_URL", "sqlite:///./ci.sqlite")
 
+# ❗️ FIXED: Use the modern CATALOG_REMOTES variable name.
 # Disable remote ingestion & background scheduler for tests.
-os.environ.setdefault("MATRIX_REMOTES", "[]")
+os.environ.setdefault("CATALOG_REMOTES", "[]")
 os.environ.setdefault("INGEST_INTERVAL_MIN", "0")
 
 # Keep logs quiet in CI unless a test explicitly raises the level.
@@ -110,8 +112,12 @@ def _ensure_scheduler_stopped() -> Generator[None, None, None]:
     yield
     try:
         from src.app import app  # lazy import to avoid side effects early
-        from src.workers.scheduler import stop_scheduler  # type: ignore
-        stop_scheduler(app)
+        from src.workers.scheduler import stop_scheduler
+
+        # ❗️ FIXED: Pass the scheduler instance from app.state, not the app itself.
+        scheduler = getattr(app.state, "scheduler", None)
+        if scheduler:
+            stop_scheduler(scheduler)
     except Exception:
         # If imports fail or scheduler wasn't started, ignore.
         pass
