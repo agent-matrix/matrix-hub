@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  packages: write # Required for pushing to container registries
 
 concurrency:
   group: dockerhub-publish
@@ -25,33 +26,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Normalize version from release tag or manual input
-      - name: Derive release version
-        id: version
-        shell: bash
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            RAW="${GITHUB_REF#refs/tags/}"
-          else
-            RAW="${{ github.event.inputs.version }}"
-          fi
-          if [ -z "$RAW" ]; then
-            echo "Version not provided."; exit 1
-          fi
-          if [[ "$RAW" =~ ^v ]]; then
-            RELEASE_TAG="$RAW"
-            SEMVER="${RAW#v}"
-          else
-            RELEASE_TAG="v$RAW"
-            SEMVER="$RAW"
-          fi
-          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
-          echo "SEMVER=$SEMVER" >> $GITHUB_ENV
-          echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
-          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
-          echo "Resolved RELEASE_TAG=${RELEASE_TAG}, SEMVER=${SEMVER}, SHORT_SHA=${SHORT_SHA}"
-
-      # docker.io requires lowercase namespace in the image path
       - name: Compute image name (lowercase)
         id: img
         shell: bash
@@ -80,26 +54,21 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE }}
-          flavor: |
-            latest=false
           tags: |
-            # stable semver tags (always)
-            type=raw,value=v${{ env.SEMVER }}
-            type=semver,pattern={{version}},value=${{ env.SEMVER }}
-            type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER }}
-            type=semver,pattern={{major}},value=${{ env.SEMVER }}
-            # short sha tag (always)
-            type=raw,value=sha-${{ env.SHORT_SHA }}
-            # latest only on release
+            # For git tags that look like a version, create semver tags
+            # e.g., v1.2.3 -> v1.2.3, v1.2, v1
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+
+            # For `release` events, also tag as 'latest'
             type=raw,value=latest,enable=${{ github.event_name == 'release' }}
-          labels: |
-            org.opencontainers.image.title=matrix-hub
-            org.opencontainers.image.description=Matrix Hub — central catalog & installer for agents, tools, and MCP servers
-            org.opencontainers.image.url=https://github.com/${{ github.repository }}
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ env.SEMVER }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.created=${{ env.BUILD_DATE }}
+
+            # For `workflow_dispatch`, use the input version as a tag
+            type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+            # Always tag with the short SHA
+            type=sha,prefix=sha-
 
       - name: Build & push (Docker Hub)
         id: build
@@ -113,17 +82,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            BUILD_VERSION=${{ env.SEMVER }}
+            BUILD_VERSION=${{ steps.meta.outputs.version }}
             BUILD_COMMIT=${{ github.sha }}
-            BUILD_DATE=${{ env.BUILD_DATE }}
+            BUILD_DATE=${{ steps.meta.outputs.created }}
 
-      - name: Inspect multi-arch manifest (release tag)
+      - name: Inspect multi-arch manifest
         if: always()
         shell: bash
         run: |
-          echo "Inspecting v${SEMVER}…"
-          docker buildx imagetools inspect "${IMAGE}:v${SEMVER}"
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "Inspecting latest…"
-            docker buildx imagetools inspect "${IMAGE}:latest"
-          fi
+          echo "Inspecting tags: ${{ steps.meta.outputs.tags }}"
+          # The primary tag will be the most specific one (e.g., the full semver)
+          PRIMARY_TAG=$(echo "${{ steps.meta.outputs.tags }}" | cut -d, -f1)
+          docker buildx imagetools inspect "${PRIMARY_TAG}"
