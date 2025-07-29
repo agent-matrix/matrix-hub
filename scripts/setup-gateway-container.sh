@@ -39,7 +39,8 @@ FORCE="false"
 # Container-friendly toggles (can be overridden via environment)
 SKIP_OS_DEPS="${SKIP_OS_DEPS:-0}"
 SKIP_PYTHON_CHECK="${SKIP_PYTHON_CHECK:-0}"
-SETUP_ONLY="${SETUP_ONLY:-0}"
+# --- MODIFIED: Default to 1 (setup only) for safer Docker builds ---
+SETUP_ONLY="${SETUP_ONLY:-1}"
 GENERATE_ENV="${GENERATE_ENV:-1}"
 PIP_QUIET="${PIP_QUIET:-1}"
 export DEBIAN_FRONTEND="${DEBIAN_FRONTEND:-noninteractive}"
@@ -82,10 +83,12 @@ run_root() {
 
 # Safer pip verbosity
 pip_run() {
+  # Always use the pip from the just-activated venv for reliability
+  local pip_cmd="${VENV_DIR}/bin/pip"
   if [ "${PIP_QUIET}" = "1" ]; then
-    pip -q "$@"
+    "${pip_cmd}" -q "$@"
   else
-    pip "$@"
+    "${pip_cmd}" "$@"
   fi
 }
 
@@ -178,7 +181,7 @@ fetch_repo() {
   fi
 }
 
-# --- 1.4 Setup Python Virtual Environment ---
+# --- 1.4 Setup Python Virtual Environment (MODIFIED FOR ROBUSTNESS) ---
 setup_venv() {
   if [[ -d "${VENV_DIR}" && "${FORCE}" == "true" ]]; then
     log "🗑  Removing existing virtual environment (as per --force flag)..."
@@ -188,18 +191,29 @@ setup_venv() {
   if [[ ! -d "${VENV_DIR}" ]]; then
     log "🐍 Creating Python virtual environment at ${VENV_DIR}..."
     "${PY_BIN}" -m venv "${VENV_DIR}"
+  else
+    log "ℹ️ Virtual environment already exists at ${VENV_DIR}."
   fi
 
   log "📦 Activating virtual environment and installing dependencies..."
   # shellcheck disable=SC1090
   source "${VENV_DIR}/bin/activate"
+
+  # Upgrade pip first using the explicit path to the venv's pip
   pip_run install --upgrade pip setuptools wheel
+
+  log "📦 Installing project dependencies from ${PROJECT_DIR}..."
   pushd "${PROJECT_DIR}" >/dev/null
-    # Try dev extras first; fall back to editable; then plain install.
-    pip_run install -e '.[dev]' || pip_run install -e . || pip_run install .
+    # Install the project and its production dependencies.
+    # The complex '.[dev]' install is not needed for a production container.
+    pip_run install -e .
   popd >/dev/null
-  log "✅ Python dependencies are installed."
+
+  log "🔍 Verifying required imports in gateway venv..."
+  "${VENV_DIR}/bin/python" -c "import gunicorn; import uvicorn; import jsonschema"
+  log "✅ Python dependencies are installed and verified."
 }
+
 
 # =============================================================================
 # PHASE 2: CONFIGURATION
@@ -259,30 +273,15 @@ EOF
 # =============================================================================
 log "### PHASE 3: GATEWAY EXECUTION ###"
 
+# --- CORRECTED: This function is simple and reliable ---
 init_db() {
   # shellcheck disable=SC1090
   source "${VENV_DIR}/bin/activate"
   pushd "${PROJECT_DIR}" >/dev/null
     log "⏳ Initializing gateway database..."
-    # This assumes the gateway package exposes a db init module/CLI. Adjust if needed.
-    python - <<'PY'
-try:
-    # Example: import and run db init if available
-    import importlib
-    for name in ("mcp_gateway.db", "mcpgateway.db", "mcpgateway.database"):
-        try:
-            mdl = importlib.import_module(name)
-            if hasattr(mdl, "main"):
-                mdl.main()
-                raise SystemExit(0)
-        except ModuleNotFoundError:
-            continue
-    print("No explicit DB init module found; skipping.", flush=True)
-except Exception as e:
-    print(f"DB init warning: {e}", flush=True)
-PY
+    python -m mcpgateway.db
   popd >/dev/null
-  log "✅ Database init step completed (or skipped)."
+  log "✅ Database initialized."
 }
 
 start_gateway() {

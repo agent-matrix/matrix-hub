@@ -21,13 +21,11 @@ jobs:
     name: Build & Push (Docker Hub)
     runs-on: ubuntu-latest
 
-    env:
-      IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/matrix-hub
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Normalize version from release tag or manual input
       - name: Derive release version
         id: version
         shell: bash
@@ -37,15 +35,32 @@ jobs:
           else
             RAW="${{ github.event.inputs.version }}"
           fi
-          # Normalize: SEMVER without leading v, RELEASE_TAG always prefixed with v
-          if [[ "$RAW" =~ ^v ]]; then
-            echo "RELEASE_TAG=$RAW" >> $GITHUB_ENV
-            echo "SEMVER=${RAW#v}" >> $GITHUB_ENV
-          else
-            echo "RELEASE_TAG=v$RAW" >> $GITHUB_ENV
-            echo "SEMVER=$RAW" >> $GITHUB_ENV
+          if [ -z "$RAW" ]; then
+            echo "Version not provided."; exit 1
           fi
-          echo "Resolved RELEASE_TAG=${RELEASE_TAG}, SEMVER=${SEMVER}"
+          if [[ "$RAW" =~ ^v ]]; then
+            RELEASE_TAG="$RAW"
+            SEMVER="${RAW#v}"
+          else
+            RELEASE_TAG="v$RAW"
+            SEMVER="$RAW"
+          fi
+          echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
+          echo "SEMVER=$SEMVER" >> $GITHUB_ENV
+          echo "SHORT_SHA=${GITHUB_SHA::7}" >> $GITHUB_ENV
+          echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
+          echo "Resolved RELEASE_TAG=${RELEASE_TAG}, SEMVER=${SEMVER}, SHORT_SHA=${SHORT_SHA}"
+
+      # docker.io requires lowercase namespace in the image path
+      - name: Compute image name (lowercase)
+        id: img
+        shell: bash
+        run: |
+          USER_RAW="${{ secrets.DOCKERHUB_USERNAME }}"
+          USER_LC="${USER_RAW,,}"
+          IMAGE="docker.io/${USER_LC}/matrix-hub"
+          echo "IMAGE=$IMAGE" >> $GITHUB_ENV
+          echo "Image: $IMAGE"
 
       - name: Set up QEMU (multi-arch)
         uses: docker/setup-qemu-action@v3
@@ -64,14 +79,19 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.IMAGE }}
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
           tags: |
-            type=raw,value=latest
+            # stable semver tags (always)
             type=raw,value=v${{ env.SEMVER }}
             type=semver,pattern={{version}},value=${{ env.SEMVER }}
             type=semver,pattern={{major}}.{{minor}},value=${{ env.SEMVER }}
             type=semver,pattern={{major}},value=${{ env.SEMVER }}
+            # short sha tag (always)
+            type=raw,value=sha-${{ env.SHORT_SHA }}
+            # latest only on release
+            type=raw,value=latest,enable=${{ github.event_name == 'release' }}
           labels: |
             org.opencontainers.image.title=matrix-hub
             org.opencontainers.image.description=Matrix Hub — central catalog & installer for agents, tools, and MCP servers
@@ -79,6 +99,7 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.version=${{ env.SEMVER }}
             org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ env.BUILD_DATE }}
 
       - name: Build & push (Docker Hub)
         id: build
@@ -91,7 +112,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_VERSION=${{ env.SEMVER }}
+            BUILD_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ env.BUILD_DATE }}
 
-      - name: Inspect multi-arch manifest
+      - name: Inspect multi-arch manifest (release tag)
+        if: always()
+        shell: bash
         run: |
-          docker buildx imagetools inspect ${{ env.IMAGE }}:${{ env.SEMVER }}
+          echo "Inspecting v${SEMVER}…"
+          docker buildx imagetools inspect "${IMAGE}:v${SEMVER}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "Inspecting latest…"
+            docker buildx imagetools inspect "${IMAGE}:latest"
+          fi
