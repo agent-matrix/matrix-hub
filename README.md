@@ -4,7 +4,7 @@
 
 # Matrix Hub
 
-[![Docker Pulls](https://img.shields.io/docker/pulls/agentmatrix/matrix-hub.svg)](https://hub.docker.com/r/agentmatrix/matrix-hub)
+[![Docker Pulls](https://img.shields.io/docker/pulls/ruslanmv/matrix-hub.svg)](https://hub.docker.com/r/ruslanmv/matrix-hub)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
