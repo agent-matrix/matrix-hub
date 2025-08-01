@@ -30,7 +30,7 @@ set -Eeuo pipefail
 
 # --- Defaults & Flags ---
 PROJECT_DIR_NAME="mcpgateway"
-BRANCH="main"
+BRANCH="v0.4.0"
 HOST="0.0.0.0"
 PORT="4444"
 NON_INTERACTIVE="false"
