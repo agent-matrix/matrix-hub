@@ -17,9 +17,9 @@ Goals
 Public API
 ----------
 - chunk_document(text, *, max_tokens=256, overlap_tokens=48, kind="auto", meta=None)
-- split_markdown_blocks(text)   -> list[str]
-- split_plain_blocks(text)      -> list[str]
-- estimate_tokens(text)         -> int
+- split_markdown_blocks(text)  -> list[str]
+- split_plain_blocks(text)       -> list[str]
+- estimate_tokens(text)          -> int
 
 Notes
 -----
@@ -33,7 +33,7 @@ import hashlib
 import math
 import re
 from dataclasses import dataclass, asdict
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 
 __all__ = [
@@ -117,7 +117,6 @@ def split_markdown_blocks(text: str) -> List[str]:
     buf: List[str] = []
 
     in_fence = False
-    fence_delim = ""
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -126,18 +125,16 @@ def split_markdown_blocks(text: str) -> List[str]:
         if line.startswith("```"):
             if not in_fence:
                 # flush current buffer as a block
-                if buf and any(l.strip() for l in buf):
+                if buf and any(line_in_buf.strip() for line_in_buf in buf):
                     blocks.append("\n".join(buf).rstrip())
                     buf = []
                 in_fence = True
-                fence_delim = line.strip()
                 buf.append(line)
             else:
                 buf.append(line)
                 blocks.append("\n".join(buf).rstrip())
                 buf = []
                 in_fence = False
-                fence_delim = ""
             i += 1
             continue
 
@@ -148,7 +145,7 @@ def split_markdown_blocks(text: str) -> List[str]:
 
         # Horizontal rule -> boundary
         if _HR_RE.match(line):
-            if buf and any(l.strip() for l in buf):
+            if buf and any(line_in_buf.strip() for line_in_buf in buf):
                 blocks.append("\n".join(buf).rstrip())
                 buf = []
             blocks.append(line.strip())
@@ -157,7 +154,7 @@ def split_markdown_blocks(text: str) -> List[str]:
 
         # Headings start a new block
         if _HEADING_RE.match(line):
-            if buf and any(l.strip() for l in buf):
+            if buf and any(line_in_buf.strip() for line_in_buf in buf):
                 blocks.append("\n".join(buf).rstrip())
                 buf = []
             # Include heading line alone
@@ -167,7 +164,7 @@ def split_markdown_blocks(text: str) -> List[str]:
 
         # Group tables as single block (consecutive lines starting with '|')
         if _TABLE_LINE_RE.match(line):
-            if buf and any(l.strip() for l in buf):
+            if buf and any(line_in_buf.strip() for line_in_buf in buf):
                 blocks.append("\n".join(buf).rstrip())
                 buf = []
             tbl = [line]
@@ -181,7 +178,7 @@ def split_markdown_blocks(text: str) -> List[str]:
 
         # Blank line => paragraph boundary
         if not line.strip():
-            if buf and any(l.strip() for l in buf):
+            if buf and any(line_in_buf.strip() for line_in_buf in buf):
                 blocks.append("\n".join(buf).rstrip())
                 buf = []
             i += 1
@@ -191,7 +188,7 @@ def split_markdown_blocks(text: str) -> List[str]:
         buf.append(line)
         i += 1
 
-    if buf and any(l.strip() for l in buf):
+    if buf and any(line_in_buf.strip() for line_in_buf in buf):
         blocks.append("\n".join(buf).rstrip())
 
     # Drop empty artifacts, normalize some whitespace
@@ -264,7 +261,6 @@ def _merge_blocks(
     windows: List[Tuple[str, int, int]] = []
     idx = 0
     # Pre-compute char offsets into a reconstructed doc for reproducible [start,end)
-    joined = "\n\n".join(blocks)
     # Build a map from block index -> char offset in joined string
     offsets: List[Tuple[int, int]] = []
     cursor = 0

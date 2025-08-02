@@ -1,4 +1,3 @@
-#src/config.py
 """
 Configuration for Matrix Hub.
 - Centralizes all environment-driven settings using pydantic-settings (Pydantic v2).
@@ -24,10 +23,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class LexicalBackend(str, Enum):
     pgtrgm = "pgtrgm"
     opensearch = "opensearch"
+    none = "none"  # allow 'none' for local/SQLite dev
 
 
 class VectorBackend(str, Enum):
-    # ❗️ FIXED: Added 'none' as a valid option to match the .env file.
     none = "none"
     pgvector = "pgvector"
     milvus = "milvus"
@@ -84,7 +83,7 @@ class Settings(BaseSettings):
 
     # ---- Database ----
     DATABASE_URL: str = Field(
-        default="sqlite:///./data/catalog.sqlite",
+        default="sqlite+pysqlite:///./data/catalog.sqlite",
         validation_alias=AliasChoices("DATABASE_URL", "database_url"),
     )
     SQL_ECHO: bool = False
@@ -93,25 +92,37 @@ class Settings(BaseSettings):
     DB_POOL_PRE_PING: bool = True
 
     # ---- CORS ----
-    # ✅ PRESERVED FIX: Union type prevents JSONDecodeError for empty/string values.
-    CORS_ALLOW_ORIGINS: Union[List[str], str] = Field(default_factory=lambda: ["*"])
+    CORS_ALLOW_ORIGINS: Union[List[str], str] = Field(
+        default_factory=lambda: ["*"],
+        validation_alias=AliasChoices(
+            "CORS_ALLOW_ORIGINS", "cors_allow_origins",
+        ),
+    )
 
-    # ---- Search backends (pluggable) ----
+    # ---- Search backends ----
     SEARCH_BACKEND__LEXICAL: LexicalBackend = Field(
-        default=LexicalBackend.pgtrgm,
-        validation_alias=AliasChoices("SEARCH_BACKEND__LEXICAL", "search_backend__lexical", "SEARCH_LEXICAL_BACKEND"),
+        default=LexicalBackend.none,
+        validation_alias=AliasChoices(
+            "SEARCH_BACKEND__LEXICAL", "search_backend__lexical", "SEARCH_LEXICAL_BACKEND",
+        ),
     )
     SEARCH_BACKEND__VECTOR: VectorBackend = Field(
-        default=VectorBackend.pgvector,
-        validation_alias=AliasChoices("SEARCH_BACKEND__VECTOR", "search_backend__vector", "SEARCH_VECTOR_BACKEND"),
+        default=VectorBackend.none,
+        validation_alias=AliasChoices(
+            "SEARCH_BACKEND__VECTOR", "search_backend__vector", "SEARCH_VECTOR_BACKEND",
+        ),
     )
     BLOBSTORE_BACKEND: BlobBackend = Field(
         default=BlobBackend.local,
-        validation_alias=AliasChoices("BLOBSTORE_BACKEND", "blobstore_backend"),
+        validation_alias=AliasChoices(
+            "BLOBSTORE_BACKEND", "blobstore_backend",
+        ),
     )
     EMBED_MODEL_ID: str = Field(
         default="all-MiniLM-L12-v2",
-        validation_alias=AliasChoices("EMBED_MODEL_ID", "EMBED_MODEL", "embed_model_id", "embed_model"),
+        validation_alias=AliasChoices(
+            "EMBED_MODEL_ID", "EMBED_MODEL", "embed_model_id", "embed_model",
+        ),
     )
     BLOB_DIR: Optional[str] = Field(
         default=None,
@@ -123,8 +134,10 @@ class Settings(BaseSettings):
         default=SearchMode.hybrid,
         validation_alias=AliasChoices("SEARCH_DEFAULT_MODE", "search_default_mode"),
     )
-    # ✅ PRESERVED FIX: Union type prevents JSONDecodeError for empty/string values.
-    SEARCH_WEIGHTS: Union[SearchWeights, str] = Field(default_factory=SearchWeights)
+    SEARCH_WEIGHTS: Union[SearchWeights, str] = Field(
+        default_factory=SearchWeights,
+        validation_alias=AliasChoices("SEARCH_WEIGHTS", "search_weights"),
+    )
     RERANK_DEFAULT: RerankMode = Field(
         default=RerankMode.none,
         validation_alias=AliasChoices("RERANK_DEFAULT", "rerank_default", "RERANK_MODE", "rerank_mode"),
@@ -136,29 +149,26 @@ class Settings(BaseSettings):
     CACHE_TTL_SECONDS: int = 4 * 60 * 60  # 4 hours
 
     # ---- Ingest / Index ----
-    # ✅ PRESERVED FIX: Union type prevents JSONDecodeError for empty/string values.
     CATALOG_REMOTES: Union[List[str], str] = Field(
         default_factory=list,
         validation_alias=AliasChoices("CATALOG_REMOTES", "catalog_remotes", "MATRIX_REMOTES", "matrix_remotes"),
     )
-    # ❗️ FIXED: Added the missing INGEST_INTERVAL_MIN field.
     INGEST_INTERVAL_MIN: int = Field(
         default=15,
         validation_alias=AliasChoices("INGEST_INTERVAL_MIN", "ingest_interval_min"),
     )
-    # Optional cron (if you use APScheduler CronTrigger)
     INGEST_CRON: str = Field(
         default="*/15 * * * *",
         validation_alias=AliasChoices("INGEST_CRON", "ingest_cron"),
     )
 
-    # ---- Tenancy & policy ----
+    # ---- Tenancy ----
     TENANCY_MODE: TenancyMode = Field(
         default=TenancyMode.single,
         validation_alias=AliasChoices("TENANCY_MODE", "tenancy_mode"),
     )
 
-    # ---- MCP-Gateway (optional) ----
+    # ---- MCP-Gateway ----
     MCP_GATEWAY_URL: Optional[str] = Field(
         default=None,
         validation_alias=AliasChoices("MCP_GATEWAY_URL", "mcp_gateway_url"),
@@ -175,7 +185,6 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ---------- Normalizers / flexible input parsing ----------
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
     def _parse_cors(cls, v: Union[str, List[str]]) -> List[str]:
@@ -187,7 +196,7 @@ class Settings(BaseSettings):
                 try:
                     return list(json.loads(v))
                 except Exception:
-                    return [x.strip() for x in v.split(",") if x.strip()]
+                    return [x.strip() for x in v.strip("[]").split(",") if x.strip()]
             return [x.strip() for x in v.split(",") if x.strip()]
         return v
 
@@ -202,7 +211,7 @@ class Settings(BaseSettings):
                 try:
                     return list(json.loads(v))
                 except Exception:
-                    return [x.strip() for x in v.split(",") if x.strip()]
+                    return [x.strip() for x in v.strip("[]").split(",") if x.strip()]
             return [x.strip() for x in v.split(",") if x.strip()]
         return v
 
@@ -231,25 +240,18 @@ class Settings(BaseSettings):
                     return SearchWeights(**parsed)
         return SearchWeights()
 
-    # ---------- Compatibility properties (do NOT remove) ----------
     @property
     def SEARCH_LEXICAL_BACKEND(self) -> str:
-        try:
-            return self.SEARCH_BACKEND__LEXICAL.value
-        except Exception:
-            return str(self.SEARCH_BACKEND__LEXICAL)
+        return self.SEARCH_BACKEND__LEXICAL.value
 
     @property
     def SEARCH_VECTOR_BACKEND(self) -> str:
-        try:
-            return self.SEARCH_BACKEND__VECTOR.value
-        except Exception:
-            return str(self.SEARCH_BACKEND__VECTOR)
+        return self.SEARCH_BACKEND__VECTOR.value
 
     @property
     def SEARCH_HYBRID_WEIGHTS(self) -> str:
         w = self.SEARCH_WEIGHTS
-        return f"sem:{round(w.semantic, 6)},lex:{round(w.lexical, 6)},q:{round(w.quality, 6)},rec:{round(w.recency, 6)}"
+        return f"sem:{w.semantic},lex:{w.lexical},q:{w.quality},rec:{w.recency}"  
 
     @property
     def RAG_ENABLED(self) -> bool:
@@ -257,10 +259,7 @@ class Settings(BaseSettings):
 
     @property
     def RERANK_MODE(self) -> str:
-        try:
-            return self.RERANK_DEFAULT.value
-        except Exception:
-            return str(self.RERANK_DEFAULT)
+        return self.RERANK_DEFAULT.value
 
     @property
     def MATRIX_REMOTES(self) -> List[str]:
@@ -273,7 +272,6 @@ class Settings(BaseSettings):
 
 # Singleton settings instance
 try:
-    # Restored original `type: ignore`
     settings = Settings()  # type: ignore[call-arg]
 except ValidationError as ve:
     raise RuntimeError(f"Invalid configuration: {ve}") from ve
