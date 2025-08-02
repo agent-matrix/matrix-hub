@@ -7,32 +7,34 @@ SHELL := /bin/sh
 # -------------------------------------------------------------------
 # Configurable variables (override via environment or on the CLI)
 # -------------------------------------------------------------------
-PY 					?= python3
-VENV_DIR 			?= .venv
-UVICORN 			?= uvicorn
-APP 				?= src.app:app
-HOST 				?= 0.0.0.0
-PORT 				?= 7300
+PY              ?= python3
+VENV_DIR        ?= .venv
+UVICORN         ?= uvicorn
+APP             ?= src.app:app
+HOST            ?= 0.0.0.0
+PORT            ?= 7300
 
-RUFF 				?= ruff
-PYTEST 				?= pytest
-ALEMBIC 			?= alembic
-ALEMBIC_INI 		?= alembic.ini
-MKDOCS 				?= mkdocs
-ENV_FILE 			?= .env
+RUFF            ?= ruff
+PYTEST          ?= pytest
+ALEMBIC         ?= alembic
+ALEMBIC_INI     ?= alembic.ini
+MKDOCS          ?= mkdocs
+ENV_FILE        ?= .env
 
 # Scripts & bash
-BASH 				?= bash
-SCRIPTS_DIR 		?= scripts
+BASH            ?= bash
+SCRIPTS_DIR     ?= scripts
 
 # MCP Gateway convenience
 GATEWAY_PROJECT_DIR ?= mcpgateway
-GATEWAY_HOST 		?= 0.0.0.0
-GATEWAY_PORT 		?= 4444
+GATEWAY_HOST        ?= 0.0.0.0
+GATEWAY_PORT        ?= 4444
 
 # Load variables from .env for each command (if file exists)
 # set -a exports all sourced variables into the environment.
-ENV := set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a;
+#ENV := set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a;
+#ENV := if [ -f "$(ENV_FILE)" ]; then set -a; . "$(ENV_FILE)"; set +a; fi;
+ENV := if [ -f "$(CURDIR)/$(ENV_FILE)" ]; then set -a; . "$(CURDIR)/$(ENV_FILE)"; set +a; fi;
 
 # Alembic - use ini if present
 ALEMBIC_CFG := $(if $(wildcard $(ALEMBIC_INI)),-c $(ALEMBIC_INI),)
@@ -63,32 +65,33 @@ help:
 	@echo "matrix-hub Makefile"
 	@echo ""
 	@echo "App:"
-	@echo "  setup           Create virtualenv and install all dependencies"
-	@echo "  dev             Run API with auto-reload"
-	@echo "  run             Run API in foreground"
-	@echo "  dev-sh          Run via scripts/run_dev.sh (loads .env, reload)"
-	@echo "  prod-sh         Run via scripts/run_prod.sh (gunicorn/uvicorn)"
+	@echo "  setup             Create virtualenv and install all dependencies"
+	@echo "  dev               Run API with auto-reload"
+	@echo "  run               Run API in foreground"
+	@echo "  dev-sh            Run via scripts/run_dev.sh (loads .env, reload)"
+	@echo "  prod-sh           Run via scripts/run_prod.sh (gunicorn/uvicorn)"
 	@echo ""
 	@echo "Docs:"
-	@echo "  docs            Serve documentation with mkdocs (live reload)"
-	@echo "  build-docs      Build static docs site"
-	@echo "  docs-deploy     Publish docs to GitHub Pages (mkdocs gh-deploy)"
+	@echo "  docs              Serve documentation with mkdocs (live reload)"
+	@echo "  build-docs        Build static docs site"
+	@echo "  docs-deploy       Publish docs to GitHub Pages (mkdocs gh-deploy)"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint            Run Ruff static checks"
-	@echo "  fmt             Auto-fix with Ruff"
-	@echo "  test            Run tests with pytest"
+	@echo "  lint              Run Ruff static checks"
+	@echo "  fmt               Auto-fix with Ruff"
+	@echo "  test              Run tests with pytest"
 	@echo ""
 	@echo "DB (Alembic):"
-	@echo "  migrate         Create Alembic revision (usage: make migrate m=\"msg\")"
-	@echo "  upgrade         Apply Alembic migrations to head"
+	@echo "  init-alembic      One-shot DB init → runs scripts/init_alembic.sh"
+	@echo "  migrate           Create Alembic revision (usage: make migrate m=\"msg\")"
+	@echo "  upgrade           Apply Alembic migrations to head"
 	@echo ""
 	@echo "MCP-Gateway (local Python mode):"
 	@echo "  deps              Install OS & Python deps (scripts/install-dependencies.sh)"
 	@echo "  gateway-install   One-shot install & run (scripts/install_mcp_gateway.sh)"
 	@echo "  gateway-setup     Clone/venv/install (scripts/setup-mcp-gateway.sh)"
 	@echo "  gateway-start     Start gateway (scripts/start-mcp-gateway.sh)"
-	@echo "  gateway-token     Generate token (use as: eval \$$(make gateway-token))" 
+	@echo "  gateway-token     Generate token (use as: eval \$$(make gateway-token))"
 	@echo "  gateway-verify    Verify servers API (scripts/verify_servers.sh)"
 	@echo "  gateway-stop      Stop gateway (scripts/stop-mcp-gateway.sh)"
 	@echo ""
@@ -170,6 +173,11 @@ test: setup ensure-env
 # -------------------------------------------------------------------
 # Database migrations (Alembic)
 # -------------------------------------------------------------------
+.PHONY: init-alembic
+init-alembic: setup ensure-env
+	@echo "▶ Running initial Alembic setup…"
+	@$(BASH) $(SCRIPTS_DIR)/init_alembic.sh $(if $(m),MSG="$(m)",)
+
 .PHONY: migrate
 migrate: setup ensure-env
 	@[ -n "$(m)" ] || (echo "Usage: make migrate m=\"your message\""; exit 2)

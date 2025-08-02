@@ -40,3 +40,4 @@ Thumbs.db
 /site
 .env.gateway.local
 /temp
+/alembic/versions

@@ -1,14 +1,34 @@
+# alembic/env.py
 from __future__ import annotations
+
+# --- Ensure project root is importable so `src.*` works when alembic runs -----
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # repo root (parent of alembic/)
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+# -----------------------------------------------------------------------------
+
 
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from sqlalchemy.engine import Connection, make_url
+from sqlalchemy.engine import Connection
 
 # Import application settings and metadata
-from src.config import settings
-from src.models import Base
+try:
+    from src.config import settings
+    from src.models import Base
+except Exception as e:  # pragma: no cover
+    # Give a clear error if imports fail (usually PYTHONPATH / venv issue)
+    raise RuntimeError(
+        "Alembic could not import 'src.config' / 'src.models'. "
+        "Make sure you run alembic inside your virtualenv and that the project "
+        "root is on PYTHONPATH. (env.py adds the repo root to sys.path automatically.)"
+    ) from e
 
 # This is the Alembic Config object, which provides access to the values
 # within the .ini file in use, if any.
@@ -24,6 +44,7 @@ target_metadata = Base.metadata
 
 # If alembic.ini does not define sqlalchemy.url, set it from settings
 if not config.get_main_option("sqlalchemy.url"):
+    # settings.DATABASE_URL should be set via env or defaults
     config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 
