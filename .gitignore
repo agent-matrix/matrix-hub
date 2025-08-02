@@ -41,3 +41,5 @@ Thumbs.db
 .env.gateway.local
 /temp
 /alembic/versions
+* copy.*
+* copy *
