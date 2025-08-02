@@ -88,6 +88,7 @@ help:
 	@echo "  gateway-install   One-shot install & run (scripts/install_mcp_gateway.sh)"
 	@echo "  gateway-setup     Clone/venv/install (scripts/setup-mcp-gateway.sh)"
 	@echo "  gateway-start     Start gateway (scripts/start-mcp-gateway.sh)"
+	@echo "  gateway-token     Generate token (use as: eval \$$(make gateway-token))" 
 	@echo "  gateway-verify    Verify servers API (scripts/verify_servers.sh)"
 	@echo "  gateway-stop      Stop gateway (scripts/stop-mcp-gateway.sh)"
 	@echo ""
@@ -199,6 +200,10 @@ gateway-setup:
 .PHONY: gateway-start
 gateway-start:
 	@$(BASH) $(SCRIPTS_DIR)/start-mcp-gateway.sh
+
+.PHONY: gateway-token
+gateway-token:
+	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/get-token-mcp-gateway.sh
 
 .PHONY: gateway-verify
 gateway-verify:
