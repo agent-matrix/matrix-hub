@@ -25,6 +25,12 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
+# --- Added: Alembic imports for DB migrations ---
+from alembic import command
+from alembic.config import Config as AlembicConfig
+from pathlib import Path
+# --- end additions ---
+
 # Local settings & modules
 from .config import settings
 from .db import init_db, close_db
@@ -107,6 +113,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     )
 
 
+# --- Added: helper to run Alembic migrations at startup ---
+def run_migrations() -> None:
+    """
+    Upgrade the database schema to the latest Alembic revision.
+    Uses alembic.ini located at the project root.
+    """
+    cfg = AlembicConfig(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+    command.upgrade(cfg, "head")
+# --- end additions ---
+
+
 # ---------- Lifespan (startup/shutdown) ----------
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -119,6 +136,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         init_db()
         log.info("Database initialized.")
+        # --- Added: ensure DB schema is up-to-date ---
+        try:
+            run_migrations()
+            log.info("Database migrations applied (alembic upgrade head).")
+        except Exception:
+            log.exception("Failed to apply database migrations.")
+            raise
+        # --- end additions ---
     except Exception:
         log.exception("Failed to initialize database.")
         raise

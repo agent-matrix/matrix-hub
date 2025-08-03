@@ -62,6 +62,7 @@ nav:
       - Endpoints: api.md
   - Catalog:
       - Ingestion: ingestion.md
+      - Local Ingestion: ingestion_local.md
       - Manifests: manifests.md
   - Search: search.md
   - Search Diagram: search-diagram.md

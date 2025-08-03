@@ -66,6 +66,7 @@ help:
 	@echo ""
 	@echo "App:"
 	@echo "  setup             Create virtualenv and install all dependencies"
+	@echo "  index-init        Init index, create empty matrix/index.json"
 	@echo "  dev               Run API with auto-reload"
 	@echo "  run               Run API in foreground"
 	@echo "  dev-sh            Run via scripts/run_dev.sh (loads .env, reload)"
@@ -103,21 +104,41 @@ help:
 # -------------------------------------------------------------------
 # Environment setup
 # -------------------------------------------------------------------
-.PHONY: setup
-setup:
+#.PHONY: setup
+#setup:
+#	@test -d $(VENV_DIR) || $(PY) -m venv $(VENV_DIR)
+#	@echo "Activating virtualenv and installing dependencies..."
+#	@$(activate) && pip install --upgrade pip setuptools wheel
+#	@$(activate) && pip install ."[dev]"
+#	@echo "Setup complete. To activate:\n\tsource $(VENV_DIR)/bin/activate"
+# This file signals that setup is complete. It depends on your requirements file.
+$(VENV_DIR)/installed: pyproject.toml
+	@echo "=> Stale or missing venv detected. Installing dependencies..."
 	@test -d $(VENV_DIR) || $(PY) -m venv $(VENV_DIR)
-	@echo "Activating virtualenv and installing dependencies..."
-	@$(activate) && pip install --upgrade pip setuptools wheel
-	@$(activate) && pip install ."[dev]"
-	@echo "Setup complete. To activate:\n\tsource $(VENV_DIR)/bin/activate"
+	@. $(VENV_DIR)/bin/activate && pip install --upgrade pip setuptools wheel
+	@. $(VENV_DIR)/bin/activate && pip install ."[dev]"
+	@echo "Setup complete."
+	@touch $@  # This creates the empty '.venv/installed' file
+
+# A friendly alias to run the installation if needed.
+.PHONY: setup
+setup: $(VENV_DIR)/installed
+
+
 
 # -------------------------------------------------------------------
 # App
 # -------------------------------------------------------------------
+#.PHONY: dev
+#dev: setup ensure-env
+#	@$(ENV) \
+#	$(activate) && \
+#	$(UVICORN) $(APP) --reload --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
+# Make other commands depend on the stamp file, NOT the phony 'setup' target.
 .PHONY: dev
-dev: setup ensure-env
+dev: $(VENV_DIR)/installed ensure-env
 	@$(ENV) \
-	$(activate) && \
+	. $(VENV_DIR)/bin/activate && \
 	$(UVICORN) $(APP) --reload --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
 
 .PHONY: run
@@ -220,6 +241,33 @@ gateway-verify:
 .PHONY: gateway-stop
 gateway-stop:
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/stop-mcp-gateway.sh
+
+
+.PHONY: index-init index-add-url index-add-inline serve-index
+
+INDEX_OUT ?= matrix/index.json
+
+index-init:
+	@python3 scripts/init.py init-empty --out $(INDEX_OUT)
+
+index-add-url:
+	@test -n "$(ID)" || (echo "ID is required"; exit 1)
+	@test -n "$(VERSION)" || (echo "VERSION is required"; exit 1)
+	@test -n "$(MANIFEST_URL)" || (echo "MANIFEST_URL is required"; exit 1)
+	@python3 scripts/init.py add-url --out $(INDEX_OUT) \
+		--id "$(ID)" --version "$(VERSION)" --name "$(NAME)" \
+		--summary "$(SUMMARY)" --manifest-url "$(MANIFEST_URL)" \
+		--homepage "$(HOMEPAGE)" --publisher "$(PUBLISHER)"
+
+index-add-inline:
+	@test -n "$(MANIFEST)" || (echo "MANIFEST=<path> is required"; exit 1)
+	@python3 scripts/init.py add-inline --out $(INDEX_OUT) --manifest "$(MANIFEST)"
+
+serve-index:
+	@python3 -m http.server 8001
+
+
+
 
 # ===================================================================
 # Container image build & run (DO NOT remove/alter existing targets)

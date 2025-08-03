@@ -9,7 +9,7 @@ After setup and starting the gateway, run a few checks to ensure it’s operatio
 make gateway-verify
 # or
 scripts/verify_servers.sh
-````
+```
 
 This will:
 

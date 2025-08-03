@@ -25,7 +25,7 @@ The MCP Gateway (also known as Context Forge) is the central hub for the Model C
 1. **Setup environment**  
    ```bash
    make gateway-setup
-````
+```
 
 This runs `scripts/setup-mcp-gateway.sh` to:
 
