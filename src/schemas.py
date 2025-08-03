@@ -96,13 +96,34 @@ class EntityDetail(BaseModel):
 # ---------------- Install API ----------------
 
 class InstallRequest(BaseModel):
-    id: str
+    """
+    Request payload for installing an entity.
+
+    Two modes of operation:
+    1) DB-backed install (catalog flow): Provide a full UID or short id + version.
+       The server will fetch the manifest from the DB entity's source_url.
+
+    2) Direct/inline install (quick testing): Provide `manifest` inline. In this mode,
+       no DB entity is required and the manifest is used directly.
+    """
+    id: str                            # e.g. "mcp_server:hello-sse-server@0.1.0"
     target: str
     version: Optional[str] = None
 
+    # Optional inline manifest if you want to bypass DB entity/source_url
+    manifest: Optional[Dict[str, Any]] = None
+
 
 class InstallResponse(BaseModel):
+    """
+    Response payload describing the installation plan and results.
+
+    - plan: a simplified plan derived from the manifest (artifacts, adapters, mcp_registration).
+    - results: list of step results (artifact installs, adapters written, gateway registration, lockfile).
+    - files_written: any files created relative to the target directory (adapters, lockfile, etc.).
+    - lockfile: the lockfile content describing the installed entity version and artifacts.
+    """
     plan: Optional[JSONDict] = None
-    results: Optional[Union[JSONDict, List[JSONDict]]] = None
+    results: List[JSONDict] = Field(default_factory=list)
     files_written: List[str] = Field(default_factory=list)
     lockfile: Optional[JSONDict] = None

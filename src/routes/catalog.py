@@ -1,3 +1,5 @@
+# src/routes/catalog.py
+
 """
 Catalog routes:
 
@@ -20,10 +22,11 @@ from ..config import settings
 from ..db import get_db
 from ..models import Entity
 from .. import schemas
+from ..utils.tools import install_inline_manifest  # NEW: inline install shortcut (skip DB)
 
 # Search plumbing (interfaces + backends)
 from ..services.search import ranker, util  # type: ignore
-
+from ..services import install  # Standard DB-backed install
 # Import search backends directly from the factory singletons
 from ..services.search import (  # type: ignore
     lexical_backend as lexical,
@@ -44,7 +47,6 @@ except Exception:  # pragma: no cover
     reranker = None  # type: ignore
 
 # Installer service
-from ..services import install  # type: ignore
 
 
 router = APIRouter(prefix="/catalog")
@@ -114,7 +116,6 @@ def search_catalog(
     # Lexical (BM25/pg_trgm) unless semantic-only
     lex_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.semantic:
-        # ❗️ FIXED: Conditionally pass `db` to avoid TypeError with Null backends in tests.
         lex_kwargs = {
             "type": filters["type"] or None,
             "capabilities": filters["capabilities"],
@@ -122,6 +123,7 @@ def search_catalog(
             "providers": filters["providers"],
             "limit": max(limit, 50),
         }
+        # Avoid passing db to Null backends
         if "Null" not in lexical.__class__.__name__:
             lex_kwargs["db"] = db
         lex_hits = lexical.search(q, **lex_kwargs)
@@ -130,7 +132,6 @@ def search_catalog(
     vec_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.keyword:
         q_vec = embedder.encode([q])[0]
-        # ❗️ FIXED: Conditionally pass `db` to avoid TypeError with Null backends in tests.
         vec_kwargs = {
             "type": filters["type"] or None,
             "capabilities": filters["capabilities"],
@@ -138,6 +139,7 @@ def search_catalog(
             "providers": filters["providers"],
             "limit": max(limit, 50),
         }
+        # Avoid passing db to Null backends
         if "Null" not in vector.__class__.__name__:
             vec_kwargs["db"] = db
         vec_hits = vector.search(q_vec, **vec_kwargs)
@@ -152,10 +154,8 @@ def search_catalog(
     if with_rag:
         _maybe_add_fit_reasons(q, top_hits)
 
-    # Serialize to DTOs; util.serialize_hit can attach entity fields if needed
     items = [schemas.SearchItem(**util.serialize_hit(h, db=db)) for h in top_hits]
     total = util.estimate_total(lex_hits, vec_hits)
-
     return schemas.SearchResponse(items=items, total=total)
 
 
@@ -192,37 +192,83 @@ def get_entity(
         updated_at=entity.updated_at,
     )
 
-
 @router.post(
     "/install",
     response_model=schemas.InstallResponse,
-    summary="Install an entity and optionally register it in MCP-Gateway",
+    summary="Install an entity and optionally register it with MCP-Gateway",
 )
-def install_entity(
+def install_entity_route(
     req: schemas.InstallRequest,
     db: Session = Depends(get_db),
 ) -> schemas.InstallResponse:
     """
-    Executes the entity's install plan (pip/uv, docker, git, etc.),
-    writes adapters into the target project, and returns a lockfile entry.
+    Execute an install plan for a catalog entity, optionally registering it
+    with MCP-Gateway, and write a lockfile for reproducibility.
+
+    What this endpoint does
+    -----------------------
+    - Reads an install plan from a manifest (either inline or from the DB).
+    - Executes artifact steps such as:
+        - PyPI install using uv/pip (system install).
+        - Docker/OCI image pull.
+        - Git clone (optional branch/ref).
+        - ZIP fetch and extract.
+    - Writes adapters (if defined in the manifest) into the target project.
+    - Executes MCP-Gateway registration if `mcp_registration` is present.
+    - Produces and writes `matrix.lock.json` describing the installed entity.
+
+    Two modes
+    ---------
+    1) Inline install (quick testing):
+       If `req.manifest` is provided, the endpoint installs directly from that
+       manifest — no database entity or prior ingest is required.
+
+    2) DB-backed install (catalog flow):
+       If `req.manifest` is not provided, the endpoint expects the entity to
+       exist in the Hub database (after a successful /ingest). It resolves by
+       `req.id` (UID like `type:name@1.2.3`) and fetches the manifest from
+       `entity.source_url`.
+
+    Error handling
+    --------------
+    - Known installation failures are returned as 422 (InstallError).
+    - Unexpected errors are returned as 500 with minimal detail.
     """
     try:
-        result = install.install_entity(
-            db=db,
-            entity_id=req.id,
-            version=req.version,
-            target=req.target,
-        )
-    except install.InstallError as exc:  # type: ignore[attr-defined]
+        if req.manifest:
+            # Inline install: bypass DB entity/source_url
+            result = install_inline_manifest(
+                db=db,
+                uid=req.id,
+                manifest=req.manifest,
+                target=req.target,
+            )
+        else:
+            # Standard catalog flow: requires prior ingest
+            result = install.install_entity(
+                db=db,
+                entity_id=req.id,
+                version=req.version,
+                target=req.target,
+            )
+
+    except install.InstallError as exc:
+        # Known error: translate to 422 with human-readable reason
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"error": "InstallError", "reason": str(exc)},
         ) from exc
 
-    # Expect result to be a dict with plan, results, files_written, lockfile
+    except Exception as exc:
+        # Unexpected error: translate to 500
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={"error": "InternalServerError", "reason": str(exc)},
+        ) from exc
+
     return schemas.InstallResponse(
         plan=result.get("plan"),
-        results=result.get("results"),
+        results=result.get("results") or [],
         files_written=result.get("files_written", []),
         lockfile=result.get("lockfile"),
     )
