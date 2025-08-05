@@ -100,7 +100,13 @@ help:
 	@echo "  container-build   Build Docker image (scripts/build_container.sh)"
 	@echo "  container-run     Run Docker container (scripts/run_container.sh)"
 	@echo ""
-
+	@echo "Monitoring:"
+	@echo "  monitor-gateway   Periodically check MCP Gateway health on HOST:PORT (default 0.0.0.0:4444)"
+	@echo "  monitor-hub       Periodically check Matrix Hub health on HOST:PORT (default 0.0.0.0:7300)"
+	@echo "Logs:"
+	@echo "  logs-gateway      Tail MCP Gateway logs (defaults to mcpgateway/logs/mcpgateway.log)"
+	@echo "  logs-hub          Tail Matrix Hub logs (file or Docker; see script --help)"
+	@echo ""
 # -------------------------------------------------------------------
 # Environment setup
 # -------------------------------------------------------------------
@@ -328,3 +334,37 @@ container-run:
 		$(if $(filter 1,$(DETACH)),-d,--foreground) \
 		$(if $(filter 1,$(PULL_RUNTIME)),--pull,) \
 		$(if $(filter 0,$(REPLACE)),--no-replace,)
+
+# -------------------------------------------------------------------
+# Monitoring (Gateway & Matrix Hub)
+# -------------------------------------------------------------------
+# seconds between checks (override: INTERVAL=2)
+MONITOR_INTERVAL ?= 5
+# optional extra flags passed to scripts (e.g., --once)
+MONITOR_ARGS     ?=
+
+.PHONY: monitor-gateway
+monitor-gateway:
+	@HOST=$(GATEWAY_HOST) PORT=$(GATEWAY_PORT) INTERVAL=$${INTERVAL:-$(MONITOR_INTERVAL)} \
+	$(BASH) $(SCRIPTS_DIR)/monitor-gateway.sh $(MONITOR_ARGS)
+
+.PHONY: monitor-hub
+monitor-hub:
+	@HOST=$${HOST:-$(HOST)} PORT=$${PORT:-$(PORT)} INTERVAL=$${INTERVAL:-$(MONITOR_INTERVAL)} \
+	$(BASH) $(SCRIPTS_DIR)/monitor-matrixhub.sh $(MONITOR_ARGS)
+
+# -------------------------------------------------------------------
+# Logs (Gateway & Matrix Hub)
+# -------------------------------------------------------------------
+
+LOG_LINES ?= 200
+
+.PHONY: logs-gateway
+logs-gateway:
+	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) LINES=$${LINES:-$(LOG_LINES)} \
+	$(BASH) $(SCRIPTS_DIR)/logs-gateway.sh $(ARGS)
+
+.PHONY: logs-hub
+logs-hub:
+	@CONTAINER_NAME=$${CONTAINER_NAME:-$(CONTAINER_NAME)} LINES=$${LINES:-$(LOG_LINES)} \
+	$(BASH) $(SCRIPTS_DIR)/logs-hub.sh $(ARGS)
