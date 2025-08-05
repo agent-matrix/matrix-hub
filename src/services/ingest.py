@@ -320,3 +320,32 @@ def _chunk_and_embed(entity: Entity, manifest: Dict[str, Any], db: Session) -> i
     db.flush()  # ensure updated_at updated by DB default/onupdate
     log.info("Embedded %d chunks for %s", len(upserts), entity.uid)
     return len(upserts)
+
+def ingest_manifest(manifest: Dict[str, Any], db: Session, do_embed: bool = True) -> Entity:
+    """
+    Ingest a single manifest dict (e.g., from a remote index.json or a raw dict).
+    Returns the upserted Entity.
+    """
+    source_url = manifest.get("source_url") or manifest.get("manifest_url")
+    entity = _upsert_entity_from_manifest(manifest, db=db, source_url=source_url)
+    
+    if do_embed:
+        _chunk_and_embed(entity=entity, manifest=manifest, db=db)
+    
+    return entity
+
+
+
+# ------------------------------------------------------------------------------
+# Entry points for the API layer to consume
+# ------------------------------------------------------------------------------
+
+def ingest_index(db: Session, index_url: str) -> Dict[str, Any]:
+    """
+    Entry point expected by the /ingest endpoint:
+    Ingest a remote index.json URL.
+    """
+    return _ingest_remote(index_url, db=db, do_embed=True)
+
+# alias for backward-compatibility
+ingest_remote = ingest_index

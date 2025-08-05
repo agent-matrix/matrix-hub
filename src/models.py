@@ -58,11 +58,11 @@ class Entity(Base):
 
     __tablename__ = "entity"
 
-    uid: Mapped[str] = mapped_column(String, primary_key=True)  # e.g., "agent:pdf-summarizer@1.4.2"
+    uid: Mapped[str] = mapped_column(String, primary_key=True)
     type: Mapped[str] = mapped_column(
         String,
         nullable=False,
-        doc="One of: 'agent' | 'tool' | 'mcp_server'",
+        doc="One of: 'agent' | 'tool' | 'mcp_server'"
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
@@ -119,21 +119,19 @@ class EmbeddingChunk(Base):
     entity_uid: Mapped[str] = mapped_column(
         String,
         ForeignKey("entity.uid", ondelete="CASCADE"),
-        primary_key=True,
+        primary_key=True
     )
     chunk_id: Mapped[str] = mapped_column(String, primary_key=True)
 
-    # Prefer pgvector.Vector(768); fallback is JSON (list of floats)
     vector: Mapped[object] = mapped_column(VECTOR_COLUMN_TYPE, nullable=True)
 
-    # Denormalized text filters for prefiltering vector search
     caps_text: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     frameworks_text: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     providers_text: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     quality_score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    embed_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # e.g., "all-MiniLM-L12-v2@2025-02"
-    raw_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # blob key for raw chunk text
+    embed_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    raw_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
@@ -144,3 +142,12 @@ class EmbeddingChunk(Base):
     __table_args__ = (
         Index("ix_embedding_chunk_updated_at", "updated_at"),
     )
+
+
+class Remote(Base):
+    """
+    Persisted catalog remotes (index.json URLs).
+    """
+
+    __tablename__ = "remote"
+    url: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
