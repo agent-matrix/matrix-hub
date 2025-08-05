@@ -15,6 +15,9 @@ set -euo pipefail
 HOST="${HOST:-0.0.0.0}"
 PORT="${PORT:-4444}"
 INTERVAL="${INTERVAL:-5}"
+# Trim any whitespace passed from Make/env so 'sleep' doesn't choke.
+INTERVAL="$(printf '%s' "$INTERVAL" | tr -d '[:space:]')"
+
 RUN_ONCE=0
 
 while [[ $# -gt 0 ]]; do
