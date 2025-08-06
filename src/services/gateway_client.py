@@ -1,28 +1,26 @@
 # -*- coding: utf-8 -*-
 """
-Minimal client for MCP‑Gateway (admin/public API).
+Minimal client for MCP-Gateway (admin/public API).
 
-This client talks to the API routers defined in mcpgateway/main.py:
-  - /tools       (ToolCreate → ToolRead)
-  - /gateways    (GatewayCreate → GatewayRead)
-  - /resources   (ResourceCreate → ResourceRead)
-  - /prompts     (PromptCreate → PromptRead)
+This client wraps the HTTP endpoints exposed by the mcpgateway service:
 
-Notes:
-- In this gateway, *registering an MCP "server"* is done via **POST /gateways**,
-  not /servers. After registration the gateway service connects and lists tools.
-- There is no /servers/{id}/discovery endpoint; discovery happens implicitly.
-  We expose a no-op trigger_discovery(...) for compatibility with install.py.
+  - POST /tools       → register new Tool definitions
+  - POST /gateways    → register MCP “servers” (gateways)
+  - POST /resources   → register Resource definitions
+  - POST /prompts     → register Prompt templates
+  - GET  /tools, /gateways, /resources, /prompts → list existing entities
 
-Auth:
-- Uses Bearer token if provided via settings.MCP_GATEWAY_TOKEN.
-
-Retries:
-- Retries transient errors (httpx.RequestError, 5xx) with small backoff.
-- Does NOT retry on 4xx (validation/conflict) unless explicitly allowed for 409.
-
-Compatibility shims:
-- Free functions: register_tool, register_server, register_resources, register_prompts, trigger_discovery, gateway_health
+Key behaviors:
+  * Auth: Bearer JWT minted just-in-time via get_mcp_admin_token().
+          Falls back to settings.MCP_GATEWAY_TOKEN if minting fails.
+  * Retries: automatically retries transient failures (5xx or network errors)
+             with exponential backoff. Does not retry 4xx except optional
+             idempotent 409 handling.
+  * Idempotency: callers can set `idempotent=True` to treat 409 (Conflict)
+                 as a no-op success.
+  * Compatibility: free functions at module level for install.py:
+      - register_tool, register_server, register_resources, register_prompts,
+        trigger_discovery, gateway_health
 """
 
 from __future__ import annotations
@@ -35,6 +33,7 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 import httpx
 
 from ..config import settings
+from ..utils.jwt_helper import get_mcp_admin_token
 
 logger = logging.getLogger(__name__)
 
@@ -44,15 +43,32 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------------------
 
 class GatewayClientError(RuntimeError):
-    """Raised for non-transient HTTP errors when communicating with MCP‑Gateway."""
+    """
+    Raised for non-transient HTTP errors when communicating with MCP-Gateway.
 
-    def __init__(self, message: str, *, status_code: Optional[int] = None, body: Optional[Any] = None):
+    Attributes:
+      status_code: HTTP status code of the failed response (if available).
+      body: parsed JSON or raw text body from the response (if available).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        body: Optional[Any] = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.body = body
 
     def __repr__(self) -> str:
-        return f"GatewayClientError(status_code={self.status_code}, message={self.args[0]!r})"
+        return (
+            f"<GatewayClientError "
+            f"status_code={self.status_code!r} "
+            f"message={self.args[0]!r} "
+            f"body={self.body!r}>"
+        )
 
 
 # --------------------------------------------------------------------------------------
@@ -61,31 +77,59 @@ class GatewayClientError(RuntimeError):
 
 class MCPGatewayClient:
     """
-    Thin sync client around httpx for MCP‑Gateway admin/public endpoints.
+    Thin sync client around httpx for MCP-Gateway admin/public endpoints.
+
+    Injects a fresh HS256 Bearer token on every request (by calling
+    get_mcp_admin_token()), so tokens never expire mid-batch. Falls back
+    to a static ADMIN_TOKEN if necessary.
+
+    Usage:
+        client = MCPGatewayClient(
+            base_url="https://gateway.example.com",
+            jwt_secret="mysecret",
+            jwt_username="admin",
+            fallback_token="STATIC_ADMIN_TOKEN",
+        )
+        client.create_tool({...})
+        client.create_gateway({...})
     """
 
     def __init__(
         self,
         base_url: Optional[str] = None,
-        token: Optional[str] = None,
         *,
+        jwt_secret: Optional[str] = None,
+        jwt_username: Optional[str] = None,
+        fallback_token: Optional[str] = None,
         timeout: float = 15.0,
         max_retries: int = 3,
         backoff_base: float = 0.5,
     ) -> None:
-        self.base_url = (base_url or getattr(settings, "MCP_GATEWAY_URL", None)
-                         or getattr(settings, "mcp_gateway_url", "")).rstrip("/")
-        self.token = token or getattr(settings, "MCP_GATEWAY_TOKEN", None) or getattr(settings, "mcp_gateway_token", None)
-        self.timeout = timeout
-        self.max_retries = max_retries
-        self.backoff_base = backoff_base
-
+        # 1) Base URL
+        self.base_url = (
+            base_url
+            or getattr(settings, "MCP_GATEWAY_URL", None)
+            or getattr(settings, "mcp_gateway_url", None)
+            or ""
+        ).rstrip("/")
         if not self.base_url:
             raise ValueError("MCP_GATEWAY_URL is not configured.")
 
-        self._headers = {"Accept": "application/json"}
-        if self.token:
-            self._headers["Authorization"] = f"Bearer {self.token}"
+        # 2) JWT parameters (mint just-in-time)
+        self.jwt_secret     = jwt_secret     or getattr(settings, "JWT_SECRET_KEY", None)
+        self.jwt_username   = jwt_username   or getattr(settings, "BASIC_AUTH_USERNAME", None)
+        self.fallback_token = fallback_token or getattr(settings, "MCP_GATEWAY_TOKEN", None)
+
+        # 3) HTTP/retry configuration
+        self.timeout     = timeout
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+
+        # 4) Base headers (will inject Authorization dynamically)
+        self._base_headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
 
     # -----------------------
     # Public convenience APIs
@@ -216,60 +260,80 @@ class MCPGatewayClient:
         ok_on_conflict: bool = False,
     ) -> httpx.Response:
         """
-        Internal request with simple retry for transient errors.
+        Core HTTP logic:
 
-        If ok_on_conflict=True and the response is 409, we return the response
-        instead of raising, so callers can treat it as "already exists".
+          1. Mint a fresh JWT (or fallback) for Authorization.
+          2. Send request with retries on 5xx & network errors.
+          3. Optionally treat 409 as success if ok_on_conflict=True.
+          4. Raise GatewayClientError on non-transient 4xx or exhausted retries.
         """
         url = f"{self.base_url}{path}"
-        attempts = self.max_retries if self.max_retries and self.max_retries > 0 else 1
-
+        attempts = max(1, self.max_retries)
         last_exc: Optional[Exception] = None
+
         for attempt in range(1, attempts + 1):
+            # 1) Mint or retrieve token
             try:
-                with httpx.Client(timeout=self.timeout, headers=self._headers) as client:
+                token = get_mcp_admin_token(
+                    secret        = self.jwt_secret,
+                    username      = self.jwt_username,
+                    ttl_seconds   = 300,
+                    fallback_token= self.fallback_token,
+                )
+            except Exception as exc:
+                # If even fallback fails, abort immediately
+                raise GatewayClientError(f"Auth token error: {exc}")
+
+            headers = {
+                **self._base_headers,
+                "Authorization": f"Bearer {token}",
+            }
+
+            try:
+                # 2) Perform HTTP call
+                with httpx.Client(timeout=self.timeout, headers=headers) as client:
                     resp = client.request(method, url, json=json_body, params=params)
 
-                # Transients (retry)
+                # 3) Check for transient server errors
                 if resp.status_code >= 500:
                     raise httpx.HTTPStatusError(
-                        f"Server error {resp.status_code}",
-                        request=resp.request,
-                        response=resp,
+                        f"Server error {resp.status_code}", request=resp.request, response=resp
                     )
 
-                # Optional idempotent 409 handling
+                # 4) Handle idempotent conflict
                 if resp.status_code == 409 and ok_on_conflict:
                     return resp
 
-                # Non-transient errors bubble
-                if resp.status_code >= 400:
+                # 5) Non-transient client errors
+                if 400 <= resp.status_code < 500:
                     try:
-                        data = resp.json()
+                        body = resp.json()
                     except Exception:
-                        data = resp.text
+                        body = resp.text
                     raise GatewayClientError(
                         f"{method} {path} failed ({resp.status_code})",
                         status_code=resp.status_code,
-                        body=data,
+                        body=body,
                     )
 
+                # 6) Success
                 return resp
 
-            except httpx.HTTPStatusError as e:
-                last_exc = e
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                logger.warning("Attempt %d/%d: server error, retrying…", attempt, attempts)
                 self._sleep_backoff(attempt)
-                continue
-            except httpx.RequestError as e:
-                # includes timeouts, network/transport errors
-                last_exc = e
-                self._sleep_backoff(attempt)
-                continue
 
-        # Exhausted retries
+            except httpx.RequestError as exc:
+                last_exc = exc
+                logger.warning("Attempt %d/%d: network error (%s), retrying…", attempt, attempts, exc)
+                self._sleep_backoff(attempt)
+
+        # 7) Exhausted retries
         if isinstance(last_exc, GatewayClientError):
             raise last_exc
         raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
+
 
     def _get_json(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         resp = self._request("GET", path, params=params)
@@ -290,6 +354,18 @@ class MCPGatewayClient:
         delay = self.backoff_base * (2 ** (attempt - 1))
         delay = delay * (0.5 + 0.5)  # simple jitter placeholder
         time.sleep(min(delay, 5.0))   # cap to 5s to keep installs snappy
+
+    def create_server(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        POST /servers with the ServerCreate payload:
+          name, description, associated_tools, associated_resources, associated_prompts
+        """
+        return self._post_json("/servers", payload, ok_on_conflict=idempotent)
 
 
 # --------------------------------------------------------------------------------------
@@ -314,16 +390,39 @@ def register_tool(tool_spec: Dict[str, Any], *, idempotent: bool = False) -> Dic
     logger.info("Registering tool with MCP‑Gateway (idempotent=%s)", idempotent)
     return _client().create_tool(tool_spec, idempotent=idempotent)
 
-
-def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+def register_server(
+    server_spec: Dict[str, Any],
+    *,
+    idempotent: bool = False
+) -> Dict[str, Any]:
     """
     Compatibility wrapper for install.py.
 
-    IMPORTANT: In this gateway, an MCP 'server' is registered via **/gateways**.
-    We normalize the manifest spec and call POST /gateways.
+    Registers an MCP server via POST /servers (not /gateways).
+    The payload must include:
+      - name: str
+      - description: str
+      - associated_tools: List[str]
+      - associated_resources: List[str]
+      - associated_prompts: Optional[List[str]]
+
+    Args:
+        server_spec: dict with the fields above, typically taken from
+                     manifest["mcp_registration"]["server"] normalized.
+        idempotent:   if True, treats HTTP 409 (Conflict) as success.
+
+    Returns:
+        The parsed JSON response from the Gateway on success.
+
+    Raises:
+        GatewayClientError on any non-transient HTTP error (4xx except
+        409 when idempotent=True, or 5xx after retries).
     """
-    logger.info("Registering MCP server (as gateway) with MCP‑Gateway (idempotent=%s)", idempotent)
-    return _client().create_gateway(server_spec, idempotent=idempotent)
+    logger.info(
+        "Registering MCP server via /servers (idempotent=%s)", 
+        idempotent
+    )
+    return _client().create_server(server_spec, idempotent=idempotent)
 
 
 def register_resources(resources: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:

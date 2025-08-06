@@ -447,85 +447,94 @@ def _install_zip(spec: Dict[str, Any], target_dir: Path) -> StepResult:
 # --------------------------------------------------------------------------------------
 # MCP-Gateway registration (best-effort)
 # --------------------------------------------------------------------------------------
-
 def _normalize_mcp_registration(reg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Light normalization to keep Gateway happy without burdening catalog authors:
-      - tool.integration_type: allow 'HTTP' as an alias for 'REST'
+      - tool.integration_type: allow 'HTTP' as alias for 'REST'
       - tool.inputSchema → tool.input_schema (alias)
-      - server.transport: uppercase (client maps to gateway transports)
+      - server.transport: uppercase (client maps to gateway transports, if ever used)
+      - pass through 'resources' and 'prompts' lists unmodified
     """
     out = dict(reg)
 
+    # Tool-side tweaks
     tool = out.get("tool")
     if isinstance(tool, dict):
         itype = (tool.get("integration_type") or "").upper()
-        if itype == "HTTP":  # alias for REST
+        if itype == "HTTP":
             tool["integration_type"] = "REST"
         elif itype in {"REST", "MCP"}:
-            tool["integration_type"] = itype or "REST"
+            tool["integration_type"] = itype
         else:
-            # default to REST if unspecified/unknown
             tool["integration_type"] = "REST"
 
         if "input_schema" not in tool and "inputSchema" in tool:
-            tool["input_schema"] = tool.get("inputSchema")
+            tool["input_schema"] = tool["inputSchema"]
 
+    # Server-side tweaks (we still uppercase in case others rely on it)
     server = out.get("server")
-    if isinstance(server, dict):
-        if "transport" in server and isinstance(server["transport"], str):
-            server["transport"] = server["transport"].upper()
+    if isinstance(server, dict) and "transport" in server:
+        server["transport"] = str(server["transport"]).upper()
 
     return out
 
 
 def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """
+    Best-effort registration of tools, servers, resources, and prompts.
+    Returns a dict of results & errors—never raises.
+    """
     reg_raw = manifest.get("mcp_registration") or {}
-    if not reg_raw:
+    if not isinstance(reg_raw, dict) or not reg_raw:
         return None
 
     reg = _normalize_mcp_registration(reg_raw)
     results: Dict[str, Any] = {}
 
-    # Tool
+    # 1) Tools
     tool = reg.get("tool")
     if tool and register_tool:
         try:
-            resp = register_tool(tool)  # POST /tools
-            results["tool"] = resp
+            results["tool"] = register_tool(tool, idempotent=True)
         except Exception as e:
             results["tool_error"] = str(e)
 
-    # Server (Gateway)
+    # 2) Server → POST /servers
     server = reg.get("server")
-    if server and register_server:
+    if isinstance(server, dict) and register_server:
         try:
-            resp = register_server(server)  # POST /gateways (via client)
-            results["server"] = resp
+            # Build the /servers payload shape:
+            srv_payload = {
+                "name":                 server["name"],
+                "description":          server.get("description", ""),
+                "associated_tools":     [tool.get("id")] if tool and tool.get("id") else [],
+                "associated_resources": reg.get("resources", []),
+                "associated_prompts":   reg.get("prompts", []),
+            }
+            results["server"] = register_server(srv_payload, idempotent=True)
+
+            # discovery is a no-op in this gateway client
             if trigger_discovery:
                 try:
-                    disc = trigger_discovery(resp)  # no-op shim
-                    results["server_discovery"] = disc
+                    results["server_discovery"] = trigger_discovery(results["server"])
                 except Exception as e:
                     results["server_discovery_error"] = str(e)
         except Exception as e:
             results["server_error"] = str(e)
 
-    # Resources
+    # 3) Resources
     resources = reg.get("resources") or []
     if resources and register_resources:
         try:
-            resp = register_resources(resources)  # POST /resources (per item)
-            results["resources"] = resp
+            results["resources"] = register_resources(resources, idempotent=True)
         except Exception as e:
             results["resources_error"] = str(e)
 
-    # Prompts
+    # 4) Prompts
     prompts = reg.get("prompts") or []
     if prompts and register_prompts:
         try:
-            resp = register_prompts(prompts)  # POST /prompts (per item)
-            results["prompts"] = resp
+            results["prompts"] = register_prompts(prompts, idempotent=True)
         except Exception as e:
             results["prompts_error"] = str(e)
 
