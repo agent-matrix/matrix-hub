@@ -1,5 +1,4 @@
-# src/db.py
-"""
+'''
 Database bootstrap for Matrix Hub.
 
 - Builds a SQLAlchemy engine from `settings.DATABASE_URL`
@@ -8,7 +7,7 @@ Database bootstrap for Matrix Hub.
     * Prefer Alembic "upgrade head" if config present
     * Fallback to Base.metadata.create_all(engine) (handy for SQLite/dev)
 - Provides `init_db()` with a simple health check and `close_db()` to dispose
-"""
+'''
 
 from __future__ import annotations
 
@@ -19,58 +18,57 @@ from typing import Generator, Optional
 
 from sqlalchemy import text, create_engine
 from sqlalchemy.engine import Engine
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.exc import IntegrityError
-from src.models import Entity  # make sure this path is correct!
 
-from .config import settings
+from src.config import settings
+from src.models import Entity  # ensure models module is on PYTHONPATH
 
 log = logging.getLogger("db")
 
 _engine: Optional[Engine] = None
-_schema_ready: bool = False  # schema ensured exactly once
+_schema_ready: bool = False  # ensure schema initialization runs only once
 
-# IMPORTANT: Bind a dummy SessionLocal at import time so
-# `from src.db import SessionLocal` never fails.
+# Placeholder SessionLocal until engine is built
 SessionLocal: sessionmaker[Session] = sessionmaker(class_=Session, future=True)
 
 
 def _build_engine() -> Engine:
+    """
+    Create a SQLAlchemy engine using project settings.
+    Applies SQLite-specific connect args when needed.
+    """
     db_url = settings.DATABASE_URL
 
-    # SQLite needs special connect args; others can use defaults.
-    connect_args = {}
+    connect_args: dict = {}
     if db_url.startswith("sqlite:///") or db_url.startswith("sqlite://"):
         connect_args["check_same_thread"] = False
 
-    # Build kwargs conditionally to avoid passing None for pool params.
-    kwargs: dict = {
+    engine_kwargs: dict = {
         "echo": settings.SQL_ECHO,
         "pool_pre_ping": settings.DB_POOL_PRE_PING,
         "connect_args": connect_args,
         "future": True,
     }
     if not db_url.startswith("sqlite"):
-        kwargs.update(
+        engine_kwargs.update(
             pool_size=settings.DB_POOL_SIZE,
             max_overflow=settings.DB_MAX_OVERFLOW,
         )
 
-    return create_engine(db_url, **kwargs)
+    return create_engine(db_url, **engine_kwargs)
 
 
 def _ensure_schema(engine: Engine) -> None:
     """
-    Ensure DB schema exists:
-      1) If Alembic is configured, run 'upgrade head'
-      2) Otherwise, fallback to SQLAlchemy create_all (dev/SQLite)
+    Ensure the database schema exists:
+      1. If an Alembic config is present, run `alembic upgrade head`
+      2. Otherwise, fall back to `Base.metadata.create_all()`
     """
     global _schema_ready
     if _schema_ready:
         return
 
-    # Prefer Alembic if present
     alembic_ini = os.environ.get("ALEMBIC_INI", "alembic.ini")
     use_alembic = os.path.exists(alembic_ini)
 
@@ -80,23 +78,23 @@ def _ensure_schema(engine: Engine) -> None:
             from alembic.config import Config
 
             cfg = Config(alembic_ini)
-            # Let Alembic use the same URL as SQLAlchemy if not set in alembic.ini
+            # Ensure Alembic uses our engine URL if not set in the ini
             if not cfg.get_main_option("sqlalchemy.url"):
                 cfg.set_main_option("sqlalchemy.url", str(engine.url))
 
-            log.info("Running Alembic migrations to head…")
+            log.info("Running Alembic migrations to head...")
             command.upgrade(cfg, "head")
             log.info("Alembic migrations applied.")
             _schema_ready = True
             return
         except Exception:
-            # Don't crash dev startup if Alembic is misconfigured; fall back
             log.exception("Alembic migration failed; falling back to create_all().")
 
-    # Fallback: create_all for dev/SQLite
+    # Fallback for dev/SQLite: direct SQLAlchemy schema creation
     try:
-        from .models import Base  # local import to avoid circular import at module load
-        log.info("Creating tables via SQLAlchemy Base.metadata.create_all()…")
+        from src.models import Base  # import here to avoid circular dependencies at module load
+
+        log.info("Creating tables via SQLAlchemy Base.metadata.create_all()...")
         Base.metadata.create_all(bind=engine)
         log.info("Schema ensured via create_all().")
         _schema_ready = True
@@ -106,12 +104,14 @@ def _ensure_schema(engine: Engine) -> None:
 
 
 def init_db() -> None:
-    """Create global engine & SessionLocal, ensure schema, and run a health check."""
+    """
+    Initialize the global engine and session factory, ensure schema,
+    and perform a simple connectivity check.
+    """
     global _engine, SessionLocal
 
     if _engine is None:
         _engine = _build_engine()
-        # Recreate SessionLocal bound to the engine.
         SessionLocal = sessionmaker(
             autocommit=False,
             autoflush=False,
@@ -121,10 +121,10 @@ def init_db() -> None:
         )
         log.info("SQLAlchemy engine initialized.")
 
-    # Ensure schema exists (migrations/create_all)
+    # Ensure our schema is in place
     _ensure_schema(_engine)
 
-    # Simple connectivity check
+    # Health check
     try:
         assert _engine is not None
         with _engine.connect() as conn:
@@ -132,12 +132,13 @@ def init_db() -> None:
         log.info("Database connectivity OK.")
     except SQLAlchemyError:
         log.exception("Database connectivity check failed.")
-        # Bubble up to stop app startup (handled by app.lifespan)
         raise
 
 
 def close_db() -> None:
-    """Dispose the engine and reset globals (called on app shutdown)."""
+    """
+    Dispose of the engine and reset globals (called on app shutdown).
+    """
     global _engine, SessionLocal, _schema_ready
     if _engine is not None:
         try:
@@ -145,19 +146,16 @@ def close_db() -> None:
         finally:
             _engine = None
             _schema_ready = False
-            # Rebind an unbound SessionLocal (import-safe)
+            # Rebind an unbound SessionLocal for import safety
             SessionLocal = sessionmaker(class_=Session, future=True)
             log.info("SQLAlchemy engine disposed.")
 
 
 def get_db() -> Generator[Session, None, None]:
     """
-    FastAPI dependency that yields a DB session and ensures cleanup.
-    Usage:
-        def endpoint(db: Session = Depends(get_db)): ...
+    FastAPI dependency: yields a database session and ensures cleanup.
     """
     if _engine is None:
-        # In case someone imported get_db directly in tests without init
         init_db()
     db = SessionLocal()
     try:
@@ -167,29 +165,31 @@ def get_db() -> Generator[Session, None, None]:
 
 
 @contextmanager
+
 def session_scope() -> Generator[Session, None, None]:
     """
-    Context manager for non-request code paths:
+    Context manager for standalone database sessions:
 
-        with session_scope() as db:
-            ...  # commit/rollback automatically
+        with session_scope() as session:
+            ...
     """
     if _engine is None:
         init_db()
-    db = SessionLocal()
+    session = SessionLocal()
     try:
-        yield db
-        db.commit()
+        yield session
+        session.commit()
     except Exception:
-        db.rollback()
+        session.rollback()
         raise
     finally:
-        db.close()
+        session.close()
 
 
-
-def save_entity(manifest: dict, session: Session):
-    """Save or update an entity in the database based on the manifest dict."""
+def save_entity(manifest: dict, session: Session) -> Entity:
+    """
+    Insert or update an Entity record based on the provided manifest dictionary.
+    """
     uid = f"{manifest['type']}:{manifest['id']}@{manifest['version']}"
     entity = session.query(Entity).filter_by(uid=uid).first()
     if entity is None:
@@ -198,19 +198,18 @@ def save_entity(manifest: dict, session: Session):
             type=manifest.get("type"),
             name=manifest.get("name"),
             version=manifest.get("version"),
-            # add other fields as needed!
+            # extend with additional fields as required
         )
         session.add(entity)
     else:
-        # Update fields if already exists (optional: only if changed)
+        # Update mutable fields
         entity.name = manifest.get("name")
         entity.version = manifest.get("version")
-        # update other fields as needed
 
     try:
         session.commit()
     except IntegrityError:
         session.rollback()
         raise
-    return entity
 
+    return entity
