@@ -195,7 +195,7 @@
       "required": ["name", "transport", "url"],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
-        "transport": { "type": "string", "enum": ["WEBSOCKET", "HTTP", "STDIO"] },
+        "transport": { "type": "string", "enum": ["WEBSOCKET", "HTTP", "STDIO", "SSE"] },
         "url": { "type": "string", "format": "uri" },
         "description": { "type": "string" },
         "annotations": { "type": "object", "additionalProperties": true }

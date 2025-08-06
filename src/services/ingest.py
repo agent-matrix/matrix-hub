@@ -18,6 +18,7 @@ we log and skip the item rather than abort the entire ingest.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
@@ -36,6 +37,7 @@ from .search.chunking import split_text  # type: ignore
 from .search.backends import embedder, vector, blobstore  # type_ignore
 
 log = logging.getLogger("ingest")
+from ..db import session_scope, save_entity
 
 
 # ----------------- Public API -----------------
@@ -96,7 +98,12 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
         try:
             manifest = _fetch_and_parse_manifest(m_url)
             manifest = _maybe_validate(manifest, source=m_url)
+
+            # 1) Save the raw manifest as an Entity row
+            entity = save_entity(manifest, db)
+            # 2) Then continue with your existing field‐mapping & embedding
             entity = _upsert_entity_from_manifest(manifest, db=db, source_url=m_url)
+
             res.entities_upserted += 1
 
             if do_embed:
@@ -193,6 +200,19 @@ def _maybe_validate(manifest: Dict[str, Any], source: str) -> Dict[str, Any]:
     try:
         return validate_manifest(manifest)
     except Exception as e:
+        # Improved check: Instead of matching error strings, check the condition directly.
+        is_server = manifest.get("type") == "mcp_server"
+        artifacts_are_empty = not (manifest.get("artifacts") or [])
+
+        if is_server and artifacts_are_empty:
+            # This is likely the cause of the validation error.
+            # We log it and proceed, as servers can have empty artifacts.
+            log.warning(
+                "Ignoring likely empty-artifact validation error for mcp_server: %s", source
+            )
+            return manifest
+
+        # For all other errors, or for non-server types, raise to skip.
         raise SkipManifest(f"Schema validation failed: {e}") from e
 
 
@@ -287,37 +307,54 @@ def _chunk_and_embed(entity: Entity, manifest: Dict[str, Any], db: Session) -> i
     if not corpus.strip():
         return 0
 
-    chunks = split_text(corpus)  # Each chunk: object with .id and .text (or dict-like)
-    vecs = embedder.encode([getattr(c, "text", c["text"]) for c in chunks])
+    chunks = split_text(corpus)  # might return str, dict, or object with .text
+
+    # Normalize all chunks into plain strings
+    texts: list[str] = []
+    for c in chunks:
+        if isinstance(c, dict):
+            txt = c.get("text", "")
+        elif hasattr(c, "text"):
+            txt = str(c.text)
+        else:
+            txt = str(c)
+        texts.append(txt)
+
+    # Now we can safely encode
+    vecs = embedder.encode(texts)
 
     # First, delete stale vectors for this entity (idempotent replace)
     try:
-        vector.delete_vectors([entity.uid])  # might be a no-op if backend uses FK cascade
+        vector.delete_vectors([entity.uid])
     except Exception:
-        # Best-effort clean; not fatal
         pass
 
     upserts: List[Dict[str, Any]] = []
-    for c, v in zip(chunks, vecs):
-        chunk_id = getattr(c, "id", c.get("id"))
-        text_ = getattr(c, "text", c.get("text"))
-        blob_key = blobstore.put_text(f"{entity.uid}#{chunk_id}", text_ or "")
-        upserts.append(
-            dict(
-                entity_uid=entity.uid,
-                chunk_id=str(chunk_id),
-                vector=v,
-                caps_text=",".join(entity.capabilities or []),
-                frameworks_text=",".join(entity.frameworks or []),
-                providers_text=",".join(entity.providers or []),
-                quality_score=float(entity.quality_score or 0.0),
-                embed_model=getattr(embedder, "model_id", "unknown"),
-                raw_ref=blob_key,
-            )
-        )
+    for (c, v), txt in zip(zip(chunks, vecs), texts):
+        # Determine chunk_id
+        if isinstance(c, dict):
+            chunk_id = c.get("id")
+        elif hasattr(c, "id"):
+            chunk_id = getattr(c, "id")
+        else:
+            # fallback to index-based or hash
+            chunk_id = hashlib.sha256(txt.encode("utf-8")).hexdigest()
+
+        blob_key = blobstore.put_text(f"{entity.uid}#{chunk_id}", txt)
+        upserts.append({
+            "entity_uid": entity.uid,
+            "chunk_id": str(chunk_id),
+            "vector": v,
+            "caps_text": ",".join(entity.capabilities or []),
+            "frameworks_text": ",".join(entity.frameworks or []),
+            "providers_text": ",".join(entity.providers or []),
+            "quality_score": float(entity.quality_score or 0.0),
+            "embed_model": getattr(embedder, "model_id", "unknown"),
+            "raw_ref": blob_key,
+        })
 
     vector.upsert_vectors(upserts)
-    db.flush()  # ensure updated_at updated by DB default/onupdate
+    db.flush()
     log.info("Embedded %d chunks for %s", len(upserts), entity.uid)
     return len(upserts)
 

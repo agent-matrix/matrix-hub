@@ -1,4 +1,3 @@
-# alembic/env.py
 from __future__ import annotations
 
 # --- Ensure project root is importable so `src.*` works when alembic runs -----
@@ -41,6 +40,9 @@ if config.config_file_name is not None:
 
 # Set the target metadata for 'autogenerate' support.
 target_metadata = Base.metadata
+
+# DEBUG: print loaded metadata tables to verify model detection
+print("Loaded tables:", Base.metadata.tables)
 
 # If alembic.ini does not define sqlalchemy.url, set it from settings
 if not config.get_main_option("sqlalchemy.url"):

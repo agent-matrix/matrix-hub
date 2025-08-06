@@ -1,0 +1,5 @@
+Hello World MCP (SSE)
+
+Minimal SSE server exposing one 'hello' tool.
+
+A minimal MCP server exposing a single 'hello' tool over Server-Sent Events (SSE).

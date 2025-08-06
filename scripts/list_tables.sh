@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # scripts/list_tables.sh
-# Prints all tables in the Matrix Hub DB by running scripts/list_tables.py
+# Prints all tables in the Matrix Hub DB (with columns & row counts)
+# by running scripts/list_tables.py
 
 set -euo pipefail
 
@@ -9,5 +10,5 @@ if [[ ! -f scripts/list_tables.py ]]; then
   exit 1
 fi
 
-echo "🔎 Listing tables in Matrix Hub database..."
+echo "🔎 Listing tables (and row counts) in Matrix Hub database..."
 python3 scripts/list_tables.py

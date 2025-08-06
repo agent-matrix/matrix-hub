@@ -74,6 +74,11 @@ class Entity(Base):
     homepage: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     source_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # **NEW**: record any gateway.register failure message here
+    gateway_error: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default=None, comment="Error text from gateway.register"
+    )
+
     tenant_id: Mapped[str] = mapped_column(String, nullable=False, default="public")
 
     # JSON lists for portability (works on SQLite & Postgres)

@@ -112,14 +112,18 @@ def install_entity(
     if not manifest:
         raise InstallError(f"Unable to load manifest for {uid} (source_url missing or fetch failed)")
 
-
-    # ← INSERT HERE: upsert into your catalog DB
-    save_entity(manifest, db)
+    # 1) Persist catalog record in its own transaction
+    try:
+        save_entity(db, manifest)       # map manifest → Entity row
+        db.commit()
+        log.info("✔ Saved Entity[%s] to catalog DB", uid)
+    except Exception:
+        db.rollback()
+        log.exception("💥 Failed to save Entity[%s] to DB", uid)
+        raise                         # abort on DB failure
 
     # Compute plan
     plan = _build_install_plan(manifest)
-
-
 
     # Execute plan
     files_written: List[str] = []
@@ -166,16 +170,38 @@ def install_entity(
         log.exception("Adapter writing failed")
         results.append(StepResult(step="adapters.write", ok=False, stderr=str(e)))
 
-    # MCP-Gateway registration
+    # 2) Best-effort MCP-Gateway registration (won’t abort install on error)
     try:
         reg_res = _maybe_register_gateway(manifest)
-        if reg_res is not None:
-            results.append(StepResult(step="gateway.register", ok=True, extra=reg_res))
-        else:
-            results.append(StepResult(step="gateway.register", ok=True, extra={"skipped": True}))
+        results.append(StepResult(
+            step="gateway.register",
+            ok=True,
+            extra=reg_res or {"skipped": True},
+        ))
+
+        # Clear any previous error
+        ent = db.get(Entity, uid)
+        if ent and ent.gateway_error:
+            ent.gateway_error = None
+            db.commit()
+            log.info("⏹ Cleared gateway_error for Entity[%s]", uid)
+
     except Exception as e:
-        log.exception("Gateway registration failed")
-        results.append(StepResult(step="gateway.register", ok=False, stderr=str(e)))
+        err_txt = str(e)
+        log.warning("⚠️ gateway.register failed for Entity[%s]: %s", uid, err_txt)
+        results.append(StepResult(step="gateway.register", ok=False, stderr=err_txt))
+
+        # Persist that error onto our catalog record for retry/inspection
+        try:
+            ent = db.get(Entity, uid)
+            if ent:
+                ent.gateway_error = err_txt
+                db.commit()
+                log.info("🏷 Tagged Entity[%s].gateway_error", uid)
+        except Exception:
+            db.rollback()
+            log.exception("💥 Failed to write gateway_error for Entity[%s]", uid)
+
 
     # Lockfile
     lockfile_data = _build_lockfile(entity, manifest, artifacts)
