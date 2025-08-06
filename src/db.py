@@ -21,6 +21,8 @@ from sqlalchemy import text, create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.exc import IntegrityError
+from src.models import Entity  # make sure this path is correct!
 
 from .config import settings
 
@@ -183,3 +185,32 @@ def session_scope() -> Generator[Session, None, None]:
         raise
     finally:
         db.close()
+
+
+
+def save_entity(manifest: dict, session: Session):
+    """Save or update an entity in the database based on the manifest dict."""
+    uid = f"{manifest['type']}:{manifest['id']}@{manifest['version']}"
+    entity = session.query(Entity).filter_by(uid=uid).first()
+    if entity is None:
+        entity = Entity(
+            uid=uid,
+            type=manifest.get("type"),
+            name=manifest.get("name"),
+            version=manifest.get("version"),
+            # add other fields as needed!
+        )
+        session.add(entity)
+    else:
+        # Update fields if already exists (optional: only if changed)
+        entity.name = manifest.get("name")
+        entity.version = manifest.get("version")
+        # update other fields as needed
+
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()
+        raise
+    return entity
+

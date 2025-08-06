@@ -57,7 +57,7 @@ try:
     )
 except Exception:  # pragma: no cover
     register_tool = register_server = register_resources = register_prompts = trigger_discovery = None  # type_ignore
-
+from ..db import session_scope, save_entity
 log = logging.getLogger("install")
 
 
@@ -112,8 +112,14 @@ def install_entity(
     if not manifest:
         raise InstallError(f"Unable to load manifest for {uid} (source_url missing or fetch failed)")
 
+
+    # ← INSERT HERE: upsert into your catalog DB
+    save_entity(manifest, db)
+
     # Compute plan
     plan = _build_install_plan(manifest)
+
+
 
     # Execute plan
     files_written: List[str] = []
