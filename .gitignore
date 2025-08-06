@@ -29,7 +29,7 @@ htmlcov/
 *.sqlite
 *.db
 *.log
-data/
+data
 pgdata/
 *.lock
 
