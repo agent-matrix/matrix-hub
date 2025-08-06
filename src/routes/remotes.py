@@ -5,7 +5,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 from dataclasses import asdict
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy.orm import Session
 
@@ -139,7 +139,10 @@ def trigger_ingest(
         try:
             stats = _ingest_one(db, url)
             # Convert dataclass to dict for Pydantic compatibility
-            results.append(IngestItemResult(url=url, ok=True, stats=asdict(stats)))
+            if stats:
+                results.append(IngestItemResult(url=url, ok=True, stats=asdict(stats)))
+            else:
+                results.append(IngestItemResult(url=url, ok=True, stats={}))
         except Exception as e:
             log.exception("Manual ingest failed for %s", url)
             results.append(IngestItemResult(url=url, ok=False, error=str(e)))
@@ -175,17 +178,21 @@ def _ingest_one(db: Session, url: str) -> Dict[str, Any] | None:
                 if style == "kw2":
                     return func(db=db, index_url=url)
             except TypeError:
+                # This block attempts different function signatures if the first fails.
                 try:
+                    # Try again with a different keyword argument.
                     return func(db=db, index_url=url)
-                except:
+                except Exception:
                     pass
                 try:
+                    # Try one last time with the other common keyword argument.
                     return func(db=db, url=url)
-                except:
+                except Exception:
                     pass
+            # If all attempts within this loop fail, re-raise the last error.
             raise
 
-    for fname in ("ingest_many","sync_remotes","sync_all"):
+    for fname in ("ingest_many", "sync_remotes", "sync_all"):
         func = getattr(ingest_mod, fname, None)
         if callable(func):
             out = func(db, [url])

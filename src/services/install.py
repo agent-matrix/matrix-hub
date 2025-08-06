@@ -57,7 +57,7 @@ try:
     )
 except Exception:  # pragma: no cover
     register_tool = register_server = register_resources = register_prompts = trigger_discovery = None  # type_ignore
-from ..db import session_scope, save_entity
+from ..db import save_entity
 log = logging.getLogger("install")
 
 

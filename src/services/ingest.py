@@ -35,9 +35,10 @@ from ..db import session_scope
 # Search & embedding utilities
 from .search.chunking import split_text  # type: ignore
 from .search.backends import embedder, vector, blobstore  # type_ignore
+from ..db import save_entity
 
 log = logging.getLogger("ingest")
-from ..db import session_scope, save_entity
+
 
 
 # ----------------- Public API -----------------
