@@ -20,14 +20,14 @@ def get_mcp_admin_token(
 ) -> str:
     """
     Mint a short-lived HS256 JWT for MCP-Gateway admin calls,
-    or fall back to ADMIN_TOKEN if minting fails.
+    or fall back to ADMIN_TOKEN or HTTP Basic if minting fails.
     """
     # 1) load inputs
     secret = secret or os.getenv("JWT_SECRET_KEY")
     user   = username or os.getenv("BASIC_AUTH_USERNAME") or "admin"
     now    = int(time.time())
 
-    # 2) attempt mint
+    # 2) attempt mint via PyJWT
     if jwt and secret:
         try:
             payload = {"sub": user, "iat": now, "exp": now + ttl_seconds}
@@ -42,13 +42,22 @@ def get_mcp_admin_token(
         if not secret:
             log.warning("JWT_SECRET_KEY missing; cannot mint JWT")
 
-    # 3) fallback
+    # 3) fallback to explicit ADMIN_TOKEN env
     fb = fallback_token or os.getenv("ADMIN_TOKEN")
     if fb:
         log.debug("Using fallback ADMIN_TOKEN")
         return fb
 
-    # 4) nothing left
+    # 4) fallback to HTTP Basic if credentials present
+    pwd = os.getenv("BASIC_AUTH_PASSWORD")
+    if user and pwd:
+        import base64
+        creds = f"{user}:{pwd}".encode("utf-8")
+        token = base64.b64encode(creds).decode("utf-8")
+        log.debug("Using HTTP Basic auth as fallback")
+        return f"Basic {token}"
+
+    # 5) nothing left
     raise RuntimeError(
-        "Unable to obtain admin token: no JWT_SECRET_KEY or fallback ADMIN_TOKEN"
+        "Unable to obtain admin token: no PyJWT, JWT_SECRET_KEY, ADMIN_TOKEN or BASIC_AUTH_PASSWORD"
     )

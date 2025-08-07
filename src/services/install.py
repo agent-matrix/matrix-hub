@@ -481,7 +481,7 @@ def _normalize_mcp_registration(reg: Dict[str, Any]) -> Dict[str, Any]:
 
 def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
-    Best-effort registration of tools, servers, resources, and prompts.
+    Best-effort registration of tools, resources, servers, gateways, and prompts.
     Returns a dict of results & errors—never raises.
     """
     reg_raw = manifest.get("mcp_registration") or {}
@@ -492,51 +492,61 @@ def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]
     results: Dict[str, Any] = {}
 
     # 1) Tools
-    tool = reg.get("tool")
-    if tool and register_tool:
+    tool_spec = reg.get("tool")
+    tool_id: Optional[Union[int, str]] = None
+    if tool_spec and register_tool:
         try:
-            results["tool"] = register_tool(tool, idempotent=True)
+            tool_resp = register_tool(tool_spec, idempotent=True)
+            results["tool"] = tool_resp
+            tool_id = tool_resp.get("id") or tool_spec.get("id")
         except Exception as e:
             results["tool_error"] = str(e)
 
-    # 2) Server → POST /servers
-    server = reg.get("server")
-    if isinstance(server, dict) and register_server:
+    # 2) Resources → create or lookup to get numeric IDs
+    resource_specs = reg.get("resources") or []
+    resource_ids: List[int] = []
+    if resource_specs and register_resources:
+        for r_spec in resource_specs:
+            try:
+                resp_list = register_resources([r_spec], idempotent=True)
+                rec = resp_list[0]
+                resource_ids.append(rec.get("id"))
+                results.setdefault("resources", []).append(rec)
+            except Exception as e:
+                results.setdefault("resources_error", []).append(str(e))
+
+    # 3) Prompts → create or lookup to get numeric IDs
+    prompt_specs = reg.get("prompts") or []
+    prompt_ids: List[int] = []
+    if prompt_specs and register_prompts:
+        for p_spec in prompt_specs:
+            try:
+                resp_list = register_prompts([p_spec], idempotent=True)
+                rec = resp_list[0]
+                prompt_ids.append(rec.get("id"))
+                results.setdefault("prompts", []).append(rec)
+            except Exception as e:
+                results.setdefault("prompts_error", []).append(str(e))
+
+    # 4) Server or Gateway
+    server_spec = reg.get("server")
+    if isinstance(server_spec, dict) and register_server:
         try:
-            # Build the /servers payload shape:
-            srv_payload = {
-                "name":                 server["name"],
-                "description":          server.get("description", ""),
-                "associated_tools":     [tool.get("id")] if tool and tool.get("id") else [],
-                "associated_resources": reg.get("resources", []),
-                "associated_prompts":   reg.get("prompts", []),
+            payload: Dict[str, Any] = {
+                "name": server_spec.get("name"),
+                "description": server_spec.get("description", ""),
+                "associated_tools": [tool_id] if tool_id is not None else [],
+                "associated_resources": resource_ids,
+                "associated_prompts": prompt_ids,
             }
-            results["server"] = register_server(srv_payload, idempotent=True)
-
-            # discovery is a no-op in this gateway client
-            if trigger_discovery:
-                try:
-                    results["server_discovery"] = trigger_discovery(results["server"])
-                except Exception as e:
-                    results["server_discovery_error"] = str(e)
+            if "url" in server_spec:
+                payload["url"] = server_spec.get("url")
+                key = "gateway"
+            else:
+                key = "server"
+            results[key] = register_server(payload, idempotent=True)
         except Exception as e:
-            results["server_error"] = str(e)
-
-    # 3) Resources
-    resources = reg.get("resources") or []
-    if resources and register_resources:
-        try:
-            results["resources"] = register_resources(resources, idempotent=True)
-        except Exception as e:
-            results["resources_error"] = str(e)
-
-    # 4) Prompts
-    prompts = reg.get("prompts") or []
-    if prompts and register_prompts:
-        try:
-            results["prompts"] = register_prompts(prompts, idempotent=True)
-        except Exception as e:
-            results["prompts_error"] = str(e)
+            results[f"{key}_error"] = str(e)
 
     return results
 
