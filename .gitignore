@@ -47,3 +47,4 @@ backup/
 matrix/index.json
 matrix.lock.json
 
+/vendor
