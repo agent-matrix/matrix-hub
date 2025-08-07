@@ -30,7 +30,7 @@ from ..models import Entity
 from .install import StepResult
 from ..config import settings
 from ..utils.jwt_helper import get_mcp_admin_token
-from .gateway_client import (_client, GatewayClientError)
+#from .gateway_client import (_client, GatewayClientError)
 
 logger = logging.getLogger(__name__)
 

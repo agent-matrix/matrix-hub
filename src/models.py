@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import List, Optional
 
 from sqlalchemy import (
+    Column, 
     String,
     Text,
     Float,
@@ -108,7 +109,8 @@ class Entity(Base):
         Index("ix_entity_type_name", "type", "name"),
         Index("ix_entity_created_at", "created_at"),
     )
-
+    gateway_registered_at = Column(DateTime(timezone=True), nullable=True)
+    gateway_last_error    = Column(Text(),             nullable=True)
 
 class EmbeddingChunk(Base):
     """

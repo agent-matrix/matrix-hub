@@ -231,3 +231,25 @@ def create_app() -> FastAPI:
 
 # ASGI callable for uvicorn/gunicorn
 app = create_app()
+
+if __name__ == "__main__":
+    import logging
+    import uvicorn
+
+    # Ensure our JSON-ish logging also applies here
+    logging.basicConfig(
+        level=getattr(logging, settings.LOG_LEVEL.upper(), logging.DEBUG),
+        stream=sys.stdout,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+
+    # Start Uvicorn with our app factory
+    uvicorn.run(
+        "src.app:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 7300)),
+        log_level=settings.LOG_LEVEL.lower(),
+        reload=True,            # optional for dev
+        factory=False,          # app is an instance, not a factory function
+    )
+

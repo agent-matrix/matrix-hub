@@ -40,7 +40,7 @@ Thumbs.db
 /site
 .env.gateway.local
 /temp
-/alembic/versions
+
 * copy.*
 * copy *
 backup/
@@ -48,3 +48,5 @@ matrix/index.json
 matrix.lock.json
 
 /vendor
+/data/blobs
+/data/blobs

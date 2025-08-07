@@ -89,7 +89,7 @@ class RemoteIngestResult:
     embeddings_upserted: int = 0
 
 
-def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
+def _ingest_remote_old(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
     log.info("Fetching index.json from %s", remote)
     index = _fetch_json(remote)
     manifest_urls = _extract_manifest_urls(index, base=remote)
@@ -114,6 +114,61 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
             log.warning("Skipping manifest: %s (%s)", m_url, sk)
         except Exception:
             log.exception("Failed handling manifest: %s", m_url)
+    return res
+
+# src/services/ingest.py
+# ----------------- Add federated gateway re-registration after ingesting each remote server
+
+def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
+    log.info("Fetching index.json from %s", remote)
+    index = _fetch_json(remote)
+    manifest_urls = _extract_manifest_urls(index, base=remote)
+    res = RemoteIngestResult(manifests_seen=len(manifest_urls))
+
+    for m_url in manifest_urls:
+        try:
+            manifest = _fetch_and_parse_manifest(m_url)
+            manifest = _maybe_validate(manifest, source=m_url)
+
+            # 1) Save the raw manifest as an Entity row
+            entity = save_entity(manifest, db)
+            # 2) Then continue with your existing field‐mapping & embedding
+            entity = _upsert_entity_from_manifest(manifest, db=db, source_url=m_url)
+
+            res.entities_upserted += 1
+
+            if do_embed:
+                emb_count = _chunk_and_embed(entity=entity, manifest=manifest, db=db)
+                res.embeddings_upserted += emb_count
+
+            # --- NEW: Re-register federated gateway in MCP-Gateway ---
+            from .gateway_client import register_server
+            if manifest.get("type") == "mcp_server":
+                # Build server_spec from the saved entity and manifest
+                remote_name = manifest.get("id") or entity.name
+                server_spec = {
+                    "name": manifest.get("name", remote_name),
+                    "description": manifest.get("description", ""),
+                    # point to SSE endpoint
+                    "url": manifest.get("url", remote).rstrip("/") + "/sse",
+                    "associated_tools": [tool.id for tool in entity.tools],      # adjust attribute access
+                    "associated_resources": [res.id for res in entity.resources],
+                    "associated_prompts": [pr.id for pr in entity.prompts],
+                }
+                try:
+                    register_server(server_spec, idempotent=True)
+                    log.info("✓ Federated gateway re-registered: %s", server_spec["name"])
+                except Exception as e:
+                    log.warning("⚠️  Failed to re-register gateway %s: %s", server_spec["name"], e)
+            # ----------------------------------------------------------
+
+        except SkipManifest as sk:
+            log.warning("Skipping manifest: %s (%s)", m_url, sk)
+        except Exception:
+            log.exception("Failed handling manifest: %s", m_url)
+    # ← add this to save the result in the database
+    db.commit()  # Ensure all changes are saved before returning:        
+    #db.commit()        
     return res
 
 

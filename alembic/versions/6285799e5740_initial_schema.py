@@ -1,8 +1,8 @@
-"""${message}
+"""Initial schema
 
-Revision ID: ${repr(up_revision)}
-Revises: ${down_revision | comma,n}
-Create Date: ${create_date}
+Revision ID: '6285799e5740'
+Revises: 
+Create Date: 2025-08-07 23:38:19.607024
 """
 
 from __future__ import annotations
@@ -12,10 +12,10 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = ${repr(up_revision)}
-down_revision = ${repr(down_revision)}
-branch_labels = ${repr(branch_labels)}
-depends_on = ${repr(depends_on)}
+revision = '6285799e5740'
+down_revision = None
+branch_labels = None
+depends_on = None
 
 
 def upgrade() -> None:
