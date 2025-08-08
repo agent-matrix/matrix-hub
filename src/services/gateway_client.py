@@ -145,73 +145,85 @@ class MCPGatewayClient:
     # -----------------------
     # Internal HTTP helpers
     # -----------------------
-
     def _request(
-        self,
-        method: str,
-        path: str,
-        *,
-        json_body: Optional[Dict[str, Any]] = None,
-        params: Optional[Dict[str, Any]] = None,
-        ok_on_conflict: bool = False,
-    ) -> httpx.Response:
-        """Core HTTP logic with auth, retries, and error handling."""
-        url = f"{self.base_url}{path}"
-        attempts = max(1, self.max_retries)
-        last_exc: Optional[Exception] = None
+            self,
+            method: str,
+            path: str,
+            *,
+            json_body: Optional[Dict[str, Any]] = None,
+            params: Optional[Dict[str, Any]] = None,
+            ok_on_conflict: bool = False,
+        ) -> httpx.Response:
+            """Core HTTP logic with auth, retries, and error handling."""
+            url = f"{self.base_url}{path}"
+            attempts = max(1, self.max_retries)
+            last_exc: Optional[Exception] = None
 
-        for attempt in range(1, attempts + 1):
-            try:
-                token = get_mcp_admin_token(
-                    secret=self.jwt_secret,
-                    username=self.jwt_username,
-                    ttl_seconds=300,
-                    fallback_token=self.fallback_token,
-                )
-            except Exception as exc:
-                raise GatewayClientError(f"Auth token error: {exc}")
-
-            headers = {**self._base_headers, "Authorization": f"Bearer {token}"}
-
-            try:
-                logger.debug("gw.request", extra={"method": method, "url": url, "attempt": attempt})
-                with httpx.Client(timeout=self.timeout, headers=headers) as client:
-                    resp = client.request(method, url, json=json_body, params=params)
-                
-                logger.info("gw.response", extra={"method": method, "url": url, "status": resp.status_code})
-
-                if resp.status_code >= 500:
-                    raise httpx.HTTPStatusError(
-                        f"Server error {resp.status_code}", request=resp.request, response=resp
+            for attempt in range(1, attempts + 1):
+                try:
+                    token = get_mcp_admin_token(
+                        secret=self.jwt_secret,
+                        username=self.jwt_username,
+                        ttl_seconds=300,
+                        fallback_token=self.fallback_token,
                     )
+                except Exception as exc:
+                    raise GatewayClientError(f"Auth token error: {exc}")
 
-                if resp.status_code == 409 and ok_on_conflict:
+                # Accept tokens returned either as a raw JWT or already prefixed ("Bearer ..." or "Basic ...")
+                t = (token or "").strip()
+                if t.lower().startswith("bearer ") or t.lower().startswith("basic "):
+                    auth_value = t
+                else:
+                    auth_value = f"Bearer {t}"
+                headers = {**self._base_headers, "Authorization": auth_value}
+
+                try:
+                    logger.debug("gw.request", extra={"method": method, "url": url, "attempt": attempt})
+                    with httpx.Client(timeout=self.timeout, headers=headers) as client:
+                        resp = client.request(method, url, json=json_body, params=params)
+
+                    logger.info("gw.response", extra={"method": method, "url": url, "status": resp.status_code})
+
+                    if resp.status_code >= 500:
+                        raise httpx.HTTPStatusError(
+                            f"Server error {resp.status_code}", request=resp.request, response=resp
+                        )
+
+                    if resp.status_code == 409 and ok_on_conflict:
+                        return resp
+
+                    if 400 <= resp.status_code < 500:
+                        try:
+                            body = resp.json()
+                        except Exception:
+                            body = resp.text
+                        raise GatewayClientError(
+                            f"{method} {path} failed ({resp.status_code})",
+                            status_code=resp.status_code,
+                            body=body,
+                        )
                     return resp
 
-                if 400 <= resp.status_code < 500:
-                    try:
-                        body = resp.json()
-                    except Exception:
-                        body = resp.text
-                    raise GatewayClientError(
-                        f"{method} {path} failed ({resp.status_code})",
-                        status_code=resp.status_code,
-                        body=body,
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "gw.retry.server",
+                        extra={"attempt": attempt, "of": attempts, "status": getattr(exc.response, "status_code", None)},
                     )
-                return resp
+                    self._sleep_backoff(attempt)
+                except httpx.RequestError as exc:
+                    last_exc = exc
+                    logger.warning(
+                        "gw.retry.network", extra={"attempt": attempt, "of": attempts, "error": str(exc)}
+                    )
+                    self._sleep_backoff(attempt)
 
-            except httpx.HTTPStatusError as exc:
-                last_exc = exc
-                logger.warning("gw.retry.server", extra={"attempt": attempt, "of": attempts, "status": getattr(exc.response, "status_code", None)})
-                self._sleep_backoff(attempt)
-            except httpx.RequestError as exc:
-                last_exc = exc
-                logger.warning("gw.retry.network", extra={"attempt": attempt, "of": attempts, "error": str(exc)})
-                self._sleep_backoff(attempt)
+            if isinstance(last_exc, GatewayClientError):
+                raise last_exc
+            raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
 
-        if isinstance(last_exc, GatewayClientError):
-            raise last_exc
-        raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
+
 
     def _get_json(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         resp = self._request("GET", path, params=params)

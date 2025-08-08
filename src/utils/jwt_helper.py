@@ -12,6 +12,7 @@ except ImportError:
 
 log = logging.getLogger(__name__)
 
+
 def get_mcp_admin_token(
     secret: str | None = None,
     username: str | None = None,
@@ -20,12 +21,17 @@ def get_mcp_admin_token(
 ) -> str:
     """
     Mint a short-lived HS256 JWT for MCP-Gateway admin calls,
-    or fall back to ADMIN_TOKEN or HTTP Basic if minting fails.
+    or fall back to MCP_GATEWAY_TOKEN / ADMIN_TOKEN or HTTP Basic if minting fails.
     """
     # 1) load inputs
     secret = secret or os.getenv("JWT_SECRET_KEY")
-    user   = username or os.getenv("BASIC_AUTH_USERNAME") or "admin"
-    now    = int(time.time())
+    user = (
+        username
+        or os.getenv("BASIC_AUTH_USERNAME")
+        or os.getenv("BASIC_AUTH_USER")
+        or "admin"
+    )
+    now = int(time.time())
 
     # 2) attempt mint via PyJWT
     if jwt and secret:
@@ -42,16 +48,18 @@ def get_mcp_admin_token(
         if not secret:
             log.warning("JWT_SECRET_KEY missing; cannot mint JWT")
 
-    # 3) fallback to explicit ADMIN_TOKEN env
-    fb = fallback_token or os.getenv("ADMIN_TOKEN")
+    # 3) fallback to explicit tokens in env (prefer MCP_GATEWAY_TOKEN, then ADMIN_TOKEN)
+    fb = fallback_token or os.getenv("MCP_GATEWAY_TOKEN") or os.getenv("ADMIN_TOKEN")
     if fb:
-        log.debug("Using fallback ADMIN_TOKEN")
+        log.debug("Using fallback gateway token from env")
+        # Could already be prefixed; client will handle both raw and prefixed values
         return fb
 
     # 4) fallback to HTTP Basic if credentials present
     pwd = os.getenv("BASIC_AUTH_PASSWORD")
     if user and pwd:
         import base64
+
         creds = f"{user}:{pwd}".encode("utf-8")
         token = base64.b64encode(creds).decode("utf-8")
         log.debug("Using HTTP Basic auth as fallback")
@@ -59,5 +67,5 @@ def get_mcp_admin_token(
 
     # 5) nothing left
     raise RuntimeError(
-        "Unable to obtain admin token: no PyJWT, JWT_SECRET_KEY, ADMIN_TOKEN or BASIC_AUTH_PASSWORD"
+        "Unable to obtain admin token: no PyJWT, JWT_SECRET_KEY, MCP_GATEWAY_TOKEN/ADMIN_TOKEN or BASIC_AUTH_PASSWORD"
     )
