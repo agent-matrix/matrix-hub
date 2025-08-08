@@ -83,7 +83,7 @@ def install_inline_manifest(
     target : str
         Target project directory where adapters and the lockfile should be written.
     source_url : Optional[str]
-        The source URL where the manifest was fetched from, for logging.
+        The source URL where the manifest was fetched from, for logging and DB provenance.
 
     Returns
     -------
@@ -174,7 +174,28 @@ def install_inline_manifest(
     # (NEW) Persist catalog entity to DB for inline installs
     # Mirrors the DB-backed flow: map manifest → Entity row via save_entity()
     try:
-        save_entity(manifest, db)
+        saved = save_entity(manifest, db)  # idempotent upsert
+        # Enrich with provenance + registration blob for later sync
+        if source_url:
+            try:
+                saved.source_url = source_url
+            except Exception:
+                # Model may not have source_url in older schemas; soft-fail
+                pass
+        reg = manifest.get("mcp_registration")
+        if isinstance(reg, dict):
+            try:
+                # Some deployments add this column via migration
+                setattr(saved, "mcp_registration", reg)
+            except Exception:
+                # If column absent, we simply skip storing the blob
+                pass
+        # Mark as not yet synced to gateway so /remotes/sync can pick it up
+        try:
+            saved.gateway_registered_at = None
+        except Exception:
+            pass
+        db.add(saved)
         db.commit()
         log.info("catalog.save", extra={"uid": uid, "ok": True})
         results.append(StepResult(step="catalog.save", ok=True))

@@ -76,9 +76,9 @@ class Entity(Base):
     source_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     # **NEW**: record any gateway.register failure message here
-    gateway_error: Mapped[Optional[str]] = mapped_column(
-        String, nullable=True, default=None, comment="Error text from gateway.register"
-    )
+    #gateway_error: Mapped[Optional[str]] = mapped_column(
+    #    String, nullable=True, default=None, comment="Error text from gateway.register"
+    #)
     # record any gateway.register failure message here
     gateway_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
 
@@ -113,6 +113,7 @@ class Entity(Base):
         Index("ix_entity_created_at", "created_at"),
     )
     gateway_registered_at = Column(DateTime(timezone=True), nullable=True)
+    mcp_registration: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class EmbeddingChunk(Base):

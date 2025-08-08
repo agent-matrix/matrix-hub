@@ -93,7 +93,7 @@ class RemoteIngestResult:
 # Ingest a single remote index (with detailed logging)
 # ------------------------------------------------------------------------------
 
-def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
+def _ingest_remote_old(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
     log = logging.getLogger("ingest")
 
     log.debug("ingest.fetch.index", extra={"remote": remote})
@@ -158,6 +158,129 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
                             log.info(
                                 "ingest.gateway.register",
                                 extra={"uid": getattr(entity, "uid", None), "name": payload["name"], "ok": True},
+                            )
+                        except Exception as e:  # best‑effort; do not fail ingest
+                            log.warning(
+                                "ingest.gateway.register.error %s",
+                                e,
+                                extra={"uid": getattr(entity, "uid", None), "name": payload["name"]},
+                            )
+                    else:
+                        log.debug(
+                            "ingest.gateway.skip",
+                            extra={"uid": getattr(entity, "uid", None), "reason": "no server.url"},
+                        )
+            except Exception:
+                # Never break ingest due to gateway registration
+                log.exception(
+                    "ingest.gateway.unexpected",
+                    extra={"uid": getattr(entity, "uid", None), "url": m_url},
+                )
+
+        except SkipManifest as sk:
+            log.warning("ingest.skip", extra={"url": m_url, "reason": str(sk)})
+        except Exception:
+            log.exception("ingest.manifest.error", extra={"url": m_url})
+
+    # Commit at the end to persist everything we did
+    try:
+        db.commit()
+        log.info(
+            "ingest.commit",
+            extra={
+                "remote": remote,
+                "entities_upserted": res.entities_upserted,
+                "embeddings_upserted": res.embeddings_upserted,
+            },
+        )
+    except Exception:
+        db.rollback()
+        log.exception("ingest.commit.error", extra={"remote": remote})
+        raise
+
+    return res
+
+
+def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
+    log = logging.getLogger("ingest")
+
+    log.debug("ingest.fetch.index", extra={"remote": remote})
+    index = _fetch_json(remote)
+    manifest_urls = _extract_manifest_urls(index, base=remote)
+
+    res = RemoteIngestResult(manifests_seen=len(manifest_urls))
+    log.info(
+        "ingest.index.parsed",
+        extra={"remote": remote, "manifests_found": len(manifest_urls)},
+    )
+
+    for m_url in manifest_urls:
+        try:
+            log.debug("ingest.manifest.fetch", extra={"url": m_url})
+            manifest = _fetch_and_parse_manifest(m_url)
+            manifest = _maybe_validate(manifest, source=m_url)
+            log.debug(
+                "ingest.manifest.validated",
+                extra={
+                    "url": m_url,
+                    "type": manifest.get("type"),
+                    "id": manifest.get("id"),
+                    "version": manifest.get("version"),
+                },
+            )
+
+            # 1) Save the raw manifest as an Entity row (idempotent upsert)
+            entity = save_entity(manifest, db)
+            # --- persist registration for later sync ---
+            if isinstance(manifest.get("mcp_registration"), dict):
+                entity.mcp_registration = manifest["mcp_registration"]
+            db.add(entity)
+            # ------------------------------------------------
+            log.info(
+                "ingest.entity.saved",
+                extra={"uid": getattr(entity, "uid", None), "source_url": m_url},
+            )
+
+            # 2) Then continue with field‐mapping & enrichment (also sets source_url)
+            entity = _upsert_entity_from_manifest(manifest, db=db, source_url=m_url)
+            log.debug("ingest.entity.upserted", extra={"uid": getattr(entity, "uid", None)})
+
+            res.entities_upserted += 1
+
+            # 3) Optional chunk+embed path
+            if do_embed:
+                emb_count = _chunk_and_embed(entity=entity, manifest=manifest, db=db)
+                res.embeddings_upserted += emb_count
+                log.info(
+                    "ingest.embed",
+                    extra={"uid": getattr(entity, "uid", None), "chunks": emb_count},
+                )
+
+            # 4) Optional: re-register federated gateway in MCP‑Gateway for mcp_server
+            try:
+                if manifest.get("type") == "mcp_server":
+                    from .gateway_client import register_server  # local import to avoid hard dep
+
+                    reg = (manifest or {}).get("mcp_registration") or {}
+                    server = reg.get("server") or {}
+                    payload = {
+                        "name": server.get("name") or (manifest.get("name") or manifest.get("id")),
+                        "description": server.get("description") or "",
+                        "url": (server.get("url") or "").rstrip("/"),
+                        "associated_tools": server.get("associated_tools") or [],
+                        "associated_resources": server.get("associated_resources") or [],
+                        "associated_prompts": server.get("associated_prompts") or [],
+                    }
+                    if payload["url"]:
+                        try:
+                            register_server(payload, idempotent=True)
+                            log.info(
+                                "ingest.gateway.register",
+                                extra={
+                                    "uid": getattr(entity, "uid", None),
+                                    "name": payload["name"],
+                                    "ok": True,
+                                },
                             )
                         except Exception as e:  # best‑effort; do not fail ingest
                             log.warning(

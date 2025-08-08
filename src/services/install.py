@@ -54,10 +54,11 @@ try:
         register_server,
         register_resources,
         register_prompts,
+        register_gateway,
         trigger_discovery,
     )
 except Exception:  # pragma: no cover
-    register_tool = register_server = register_resources = register_prompts = trigger_discovery = None  # type_ignore
+    register_tool = register_server = register_resources = register_prompts = register_gateway = trigger_discovery = None  # type: ignore
 from ..db import save_entity
 log = logging.getLogger("install")
 
@@ -86,13 +87,16 @@ class StepResult:
 # --------------------------------------------------------------------------------------
 
 
-def sync_registry_gateways(db: Session) -> None:
+def sync_registry_gateways_old(db: Session) -> None:
     """
     Re-affirm registration of all new mcp_server entities in the MCP-Gateway,
     tracking success or errors in the database.
-    """
-    from .gateway_client import register_server
 
+    Updated flow (Tool → Resources → Prompts → Gateway):
+      • Uses the entity.mcp_registration JSON saved during ingest.
+      • Registers tool first (idempotent), then resources/prompts to get numeric IDs,
+        then registers the federated gateway (/gateways) with the associations.
+    """
     # Only pick up freshly ingested MCP servers (not yet registered)
     new_servers = (
         db.query(Entity)
@@ -104,37 +108,157 @@ def sync_registry_gateways(db: Session) -> None:
     )
 
     for ent in new_servers:
-        # Extract the 'server' spec from the manifest registration block
-        mcp_reg = getattr(ent, "mcp_registration", {}) or {}
-        spec = mcp_reg.get("server") if isinstance(mcp_reg, dict) else None
-        if not isinstance(spec, dict):
-            continue
-
-        # Normalize URL: ensure trailing /sse for SSE transport
-        url = spec.get("url", "").rstrip("/")
-        if spec.get("transport", "").upper() == "SSE" and not url.endswith("/sse"):
-            url += "/sse"
-
-        payload = {
-            "name":                spec.get("name", ent.name),
-            "description":         spec.get("description", ""),
-            "url":                 url,
-            "associated_tools":    spec.get("associated_tools", []),
-            "associated_resources": spec.get("associated_resources", []),
-            "associated_prompts":  spec.get("associated_prompts", []),
-        }
+        # Pull the mcp_registration block that should have been persisted at ingest
+        reg = getattr(ent, "mcp_registration", {}) or {}
+        tool_spec = (reg.get("tool") or {}) if isinstance(reg, dict) else {}
+        resources = (reg.get("resources") or []) if isinstance(reg, dict) else []
+        server = (reg.get("server") or {}) if isinstance(reg, dict) else {}
+        prompts = (reg.get("prompts") or []) if isinstance(reg, dict) else []
 
         try:
-            register_server(payload, idempotent=True)
+            # 1) Tool (ensure name is set; gateway expects name)
+            if register_tool and tool_spec:
+                t_spec = {**tool_spec}
+                t_spec["name"] = t_spec.get("name") or t_spec.get("id")
+                register_tool(t_spec, idempotent=True)
+
+            # 2) Resources → collect numeric IDs
+            resource_ids: List[int] = []
+            if register_resources and resources:
+                res_resps = register_resources(resources, idempotent=True)
+                resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
+
+            # 3) Prompts → collect numeric IDs
+            prompt_ids: List[int] = []
+            if register_prompts and prompts:
+                pr_resps = register_prompts(prompts, idempotent=True)
+                prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
+
+            # 4) Federated Gateway (/gateways). Normalize SSE endpoint if needed.
+            base = (server.get("url") or "").rstrip("/")
+            transport = (server.get("transport") or "").upper()
+            if base and transport == "SSE" and not base.endswith("/messages/"):
+                base = f"{base}/messages/"
+
+            gw_payload = {
+                "name": server.get("name", ent.name),
+                "description": server.get("description", ""),
+                "url": base,
+                "associated_tools": [tool_spec.get("id")] if tool_spec.get("id") else [],
+                "associated_resources": resource_ids,
+                "associated_prompts": prompt_ids,
+            }
+
+            if register_gateway:
+                register_gateway(gw_payload, idempotent=True)
+            else:
+                # Back-compat: if register_gateway is not available, try register_server
+                if register_server:
+                    register_server(gw_payload, idempotent=True)
+
             ent.gateway_registered_at = datetime.utcnow()
-            ent.gateway_error = None            
-            log.info("✓ Synced gateway: %s", payload["name"])
-        except Exception as e:
-            # Record the error for later inspection
-            ent.gateway_error = str(e)
-            log.warning("⚠️ Failed to sync gateway %s: %s", payload["name"], e)
-        finally:
+            # keep the column name used in your schema
+            if hasattr(ent, "gateway_error"):
+                ent.gateway_error = None
+            db.add(ent)
             db.commit()
+            log.info("✓ Federated gateway synced: %s", gw_payload["name"])
+
+        except Exception as e:
+            # Record error text for later inspection / retries
+            if hasattr(ent, "gateway_error"):
+                ent.gateway_error = str(e)
+            db.add(ent)
+            db.commit()
+            log.warning("⚠️ Gateway sync failed for %s: %s", ent.uid, e)
+
+
+def sync_registry_gateways(db: Session) -> None:
+    """
+    Re-affirm registration of all *new* mcp_server entities in the MCP-Gateway,
+    tracking success or errors in the database.
+
+    Updated flow (Tool → Resources → Prompts → Gateway):
+      • Uses the entity.mcp_registration JSON saved during ingest.
+      • Registers tool first (idempotent), then resources/prompts to get numeric IDs,
+        then registers the federated gateway (/gateways) with the associations.
+    """
+    # Only pick up freshly ingested MCP servers (not yet registered)
+    new_servers = (
+        db.query(Entity)
+          .filter(
+              Entity.type == "mcp_server",
+              Entity.gateway_registered_at.is_(None)
+          )
+          .all()
+    )
+
+    for ent in new_servers:
+        # Pull the mcp_registration block that should have been persisted at ingest
+        reg = getattr(ent, "mcp_registration", {}) or {}
+        tool_spec = (reg.get("tool") or {}) if isinstance(reg, dict) else {}
+        resources = (reg.get("resources") or []) if isinstance(reg, dict) else []
+        server = (reg.get("server") or {}) if isinstance(reg, dict) else {}
+        prompts = (reg.get("prompts") or []) if isinstance(reg, dict) else []
+
+        try:
+            # 1) Tool (ensure name is set; gateway expects name)
+            if 'register_tool' in globals() and register_tool and tool_spec:
+                t_spec = {**tool_spec}
+                t_spec["name"] = t_spec.get("name") or t_spec.get("id")
+                register_tool(t_spec, idempotent=True)
+
+            # 2) Resources → collect numeric IDs
+            resource_ids: List[int] = []
+            if 'register_resources' in globals() and register_resources and resources:
+                res_resps = register_resources(resources, idempotent=True)
+                resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
+
+            # 3) Prompts → collect numeric IDs
+            prompt_ids: List[int] = []
+            if 'register_prompts' in globals() and register_prompts and prompts:
+                pr_resps = register_prompts(prompts, idempotent=True)
+                prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
+
+            # 4) Federated Gateway (/gateways). Normalize SSE endpoint if needed.
+            base = (server.get("url") or "").rstrip("/")
+            transport = (server.get("transport") or "").upper()
+            if base and transport == "SSE" and not base.endswith("/messages/"):
+                base = f"{base}/messages/"
+
+            gw_payload = {
+                "name": server.get("name", ent.name),
+                "description": server.get("description", ""),
+                "url": base,
+                "associated_tools": [tool_spec.get("id")] if tool_spec.get("id") else [],
+                "associated_resources": resource_ids,
+                "associated_prompts": prompt_ids,
+            }
+
+            # Prefer new gateway wrapper; fall back to register_server for back-compat
+            if 'register_gateway' in globals() and register_gateway:
+                register_gateway(gw_payload, idempotent=True)
+            elif 'register_server' in globals() and register_server:
+                register_server(gw_payload, idempotent=True)
+            else:
+                raise RuntimeError("No gateway registration function available")
+
+            ent.gateway_registered_at = datetime.utcnow()
+            if hasattr(ent, "gateway_error"):
+                ent.gateway_error = None
+            db.add(ent)
+            db.commit()
+            log.info("✓ Federated gateway synced: %s", gw_payload["name"]) 
+
+        except Exception as e:
+            # Record error text for later inspection / retries
+            if hasattr(ent, "gateway_error"):
+                ent.gateway_error = str(e)
+            db.add(ent)
+            db.commit()
+            log.warning("⚠️ Gateway sync failed for %s: %s", ent.uid, e)
+
+
 
 
 def install_entity(
@@ -248,7 +372,7 @@ def install_entity(
 
         # Clear any previous error
         ent = db.get(Entity, uid)
-        if ent and ent.gateway_error:
+        if ent and getattr(ent, "gateway_error", None):
             ent.gateway_error = None
             db.commit()
             log.info("⏹ Cleared gateway_error for Entity[%s]", uid)
@@ -513,6 +637,7 @@ def _install_zip(spec: Dict[str, Any], target_dir: Path) -> StepResult:
 # --------------------------------------------------------------------------------------
 # MCP-Gateway registration (best-effort)
 # --------------------------------------------------------------------------------------
+
 def _normalize_mcp_registration(reg: Dict[str, Any]) -> Dict[str, Any]:
     """
     Light normalization to keep Gateway happy without burdening catalog authors:

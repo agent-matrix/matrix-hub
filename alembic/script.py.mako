@@ -44,9 +44,11 @@ def upgrade() -> None:
         sa.Column('updated_at', sa.DateTime(timezone=True), nullable=False,
                   server_default=sa.text("CURRENT_TIMESTAMP"),
                   onupdate=sa.text("CURRENT_TIMESTAMP")),
-        # NEW COLUMNS: track gateway registration state and errors
+        # Track gateway registration state and errors
         sa.Column('gateway_registered_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('gateway_error', sa.Text(), nullable=True),
+        # NEW: persist manifest’s mcp_registration block
+        sa.Column('mcp_registration', sa.JSON(), nullable=True),
         # inline check constraint so SQLite doesn't need an ALTER later
         sa.CheckConstraint(
             "type in ('agent','tool','mcp_server')",
