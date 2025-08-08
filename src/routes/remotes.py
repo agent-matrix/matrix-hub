@@ -116,46 +116,6 @@ def _parse_initial_remotes() -> Set[str]:
 # --------------------------------------------------------------------------------------
 # Endpoints
 # --------------------------------------------------------------------------------------
-#@router.post("/remotes/sync")
-#def sync_remotes(db: Session = Depends(get_db)):
-#    """
-#    Trigger a full sync: ingest all configured remotes into Matrix Hub,
-#    then re-affirm their registration in MCP-Gateway.
-#    """
-#    # Gather all remote URLs from the DB
-#    remotes = [r.url for r in db.query(Remote).all()]
-#    if not remotes:
-#        return {"status": "no remotes configured"}
-#
-#    success: List[str] = []
-#    failures: Dict[str, str] = {}
-#
-#    # 1) Ingest *each* remote index.json
-#    for url in remotes:
-#        try:
-#            ingest_index(db=db, index_url=url)
-#            success.append(url)
-#        except Exception as e:
-#            log.warning("Ingest failed for %s: %s", url, e)
-#            failures[url] = str(e)
-#
-#    # 2) Re-register gateways for anything we just ingested
-#    if success:
-#        try:
-#            sync_registry_gateways(db)
-#        except Exception as e:
-#            log.exception("Gateway sync failed after ingest")
-#            raise HTTPException(status_code=500, detail=f"Gateway sync error: {e}")
-#
-#    # Return detailed summary
-#    return {
-#        "ingested": success,
-#        "errors": failures,
-#        "gateways_synced": bool(success),
-#    }
-
-
-
 
 @router.post("/remotes/sync")
 def sync_remotes(db: Session = Depends(get_db)):
