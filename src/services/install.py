@@ -86,93 +86,6 @@ class StepResult:
 # Public API
 # --------------------------------------------------------------------------------------
 
-
-def sync_registry_gateways_old(db: Session) -> None:
-    """
-    Re-affirm registration of all new mcp_server entities in the MCP-Gateway,
-    tracking success or errors in the database.
-
-    Updated flow (Tool → Resources → Prompts → Gateway):
-      • Uses the entity.mcp_registration JSON saved during ingest.
-      • Registers tool first (idempotent), then resources/prompts to get numeric IDs,
-        then registers the federated gateway (/gateways) with the associations.
-    """
-    # Only pick up freshly ingested MCP servers (not yet registered)
-    new_servers = (
-        db.query(Entity)
-          .filter(
-              Entity.type == "mcp_server",
-              Entity.gateway_registered_at.is_(None)
-          )
-          .all()
-    )
-
-    for ent in new_servers:
-        # Pull the mcp_registration block that should have been persisted at ingest
-        reg = getattr(ent, "mcp_registration", {}) or {}
-        tool_spec = (reg.get("tool") or {}) if isinstance(reg, dict) else {}
-        resources = (reg.get("resources") or []) if isinstance(reg, dict) else []
-        server = (reg.get("server") or {}) if isinstance(reg, dict) else {}
-        prompts = (reg.get("prompts") or []) if isinstance(reg, dict) else []
-
-        try:
-            # 1) Tool (ensure name is set; gateway expects name)
-            if register_tool and tool_spec:
-                t_spec = {**tool_spec}
-                t_spec["name"] = t_spec.get("name") or t_spec.get("id")
-                register_tool(t_spec, idempotent=True)
-
-            # 2) Resources → collect numeric IDs
-            resource_ids: List[int] = []
-            if register_resources and resources:
-                res_resps = register_resources(resources, idempotent=True)
-                resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
-
-            # 3) Prompts → collect numeric IDs
-            prompt_ids: List[int] = []
-            if register_prompts and prompts:
-                pr_resps = register_prompts(prompts, idempotent=True)
-                prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
-
-            # 4) Federated Gateway (/gateways). Normalize SSE endpoint if needed.
-            base = (server.get("url") or "").rstrip("/")
-            transport = (server.get("transport") or "").upper()
-            if base and transport == "SSE" and not base.endswith("/messages/"):
-                base = f"{base}/messages/"
-
-            gw_payload = {
-                "name": server.get("name", ent.name),
-                "description": server.get("description", ""),
-                "url": base,
-                "associated_tools": [tool_spec.get("id")] if tool_spec.get("id") else [],
-                "associated_resources": resource_ids,
-                "associated_prompts": prompt_ids,
-            }
-
-            if register_gateway:
-                register_gateway(gw_payload, idempotent=True)
-            else:
-                # Back-compat: if register_gateway is not available, try register_server
-                if register_server:
-                    register_server(gw_payload, idempotent=True)
-
-            ent.gateway_registered_at = datetime.utcnow()
-            # keep the column name used in your schema
-            if hasattr(ent, "gateway_error"):
-                ent.gateway_error = None
-            db.add(ent)
-            db.commit()
-            log.info("✓ Federated gateway synced: %s", gw_payload["name"])
-
-        except Exception as e:
-            # Record error text for later inspection / retries
-            if hasattr(ent, "gateway_error"):
-                ent.gateway_error = str(e)
-            db.add(ent)
-            db.commit()
-            log.warning("⚠️ Gateway sync failed for %s: %s", ent.uid, e)
-
-
 def sync_registry_gateways(db: Session) -> None:
     """
     Re-affirm registration of all *new* mcp_server entities in the MCP-Gateway,
@@ -193,6 +106,9 @@ def sync_registry_gateways(db: Session) -> None:
           .all()
     )
 
+    # Lazy import here to avoid circular imports and silent disablement
+    from . import gateway_client as gw
+
     for ent in new_servers:
         # Pull the mcp_registration block that should have been persisted at ingest
         reg = getattr(ent, "mcp_registration", {}) or {}
@@ -203,21 +119,24 @@ def sync_registry_gateways(db: Session) -> None:
 
         try:
             # 1) Tool (ensure name is set; gateway expects name)
-            if 'register_tool' in globals() and register_tool and tool_spec:
+            if tool_spec:
+                log.info("sync.gw", extra={"step": "tool", "name": tool_spec.get("name") or tool_spec.get("id")})
                 t_spec = {**tool_spec}
                 t_spec["name"] = t_spec.get("name") or t_spec.get("id")
-                register_tool(t_spec, idempotent=True)
+                gw.register_tool(t_spec, idempotent=True)
 
             # 2) Resources → collect numeric IDs
             resource_ids: List[int] = []
-            if 'register_resources' in globals() and register_resources and resources:
-                res_resps = register_resources(resources, idempotent=True)
+            if resources:
+                log.info("sync.gw", extra={"step": "resources", "count": len(resources)})
+                res_resps = gw.register_resources(resources, idempotent=True)
                 resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
 
             # 3) Prompts → collect numeric IDs
             prompt_ids: List[int] = []
-            if 'register_prompts' in globals() and register_prompts and prompts:
-                pr_resps = register_prompts(prompts, idempotent=True)
+            if prompts:
+                log.info("sync.gw", extra={"step": "prompts", "count": len(prompts)})
+                pr_resps = gw.register_prompts(prompts, idempotent=True)
                 prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
 
             # 4) Federated Gateway (/gateways). Normalize SSE endpoint if needed.
@@ -235,14 +154,11 @@ def sync_registry_gateways(db: Session) -> None:
                 "associated_prompts": prompt_ids,
             }
 
-            # Prefer new gateway wrapper; fall back to register_server for back-compat
-            if 'register_gateway' in globals() and register_gateway:
-                register_gateway(gw_payload, idempotent=True)
-            elif 'register_server' in globals() and register_server:
-                register_server(gw_payload, idempotent=True)
-            else:
-                raise RuntimeError("No gateway registration function available")
+            # 4) Federated Gateway (/gateways)
+            log.info("sync.gw", extra={"step": "gateway", "name": gw_payload["name"], "url": gw_payload.get("url")})
+            gw.register_gateway(gw_payload, idempotent=True)
 
+            # Success: mark registered _after_ /gateways succeeds
             ent.gateway_registered_at = datetime.utcnow()
             if hasattr(ent, "gateway_error"):
                 ent.gateway_error = None
@@ -251,13 +167,12 @@ def sync_registry_gateways(db: Session) -> None:
             log.info("✓ Federated gateway synced: %s", gw_payload["name"]) 
 
         except Exception as e:
-            # Record error text for later inspection / retries
+            # Failure: store error per-entity so retries can pick it up
             if hasattr(ent, "gateway_error"):
                 ent.gateway_error = str(e)
             db.add(ent)
             db.commit()
             log.warning("⚠️ Gateway sync failed for %s: %s", ent.uid, e)
-
 
 
 

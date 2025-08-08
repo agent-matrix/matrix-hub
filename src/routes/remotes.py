@@ -125,10 +125,21 @@ def sync_remotes(db: Session = Depends(get_db)):
 
     Returns a summary of ingested URLs, any errors, and whether gateways were synced.
     """
-    # Gather all remote URLs from the DB
+    # Gather all remote URLs from the DB; if empty, seed from MATRIX_REMOTES
     remotes = [r.url for r in db.query(Remote).all()]
+    seeded = False
     if not remotes:
-        return {"status": "no remotes configured"}
+        initial = sorted(_parse_initial_remotes())
+        if initial:
+            for u in initial:
+                db.add(Remote(url=u))
+            db.commit()
+            seeded = True
+            remotes = [r.url for r in db.query(Remote).all()]
+
+    if not remotes:
+        # Still nothing to ingest; return early with a clear status
+        return {"status": "no remotes configured", "seeded": seeded}
 
     success: List[str] = []
     failures: Dict[str, str] = {}
@@ -145,18 +156,22 @@ def sync_remotes(db: Session = Depends(get_db)):
             failures[url] = str(e)
 
     # 2) Re-register gateways only if at least one ingest succeeded
+    synced = False
     if success:
         try:
             sync_registry_gateways(db)
+            synced = True
         except Exception as e:
             log.exception("Gateway sync failed after ingest")
             raise HTTPException(status_code=500, detail=f"Gateway sync error: {e}")
 
     # Return detailed summary
     return {
+        "seeded": seeded,
         "ingested": success,
         "errors": failures,
-        "gateways_synced": bool(success),
+        "synced": synced,
+        "count": len(remotes),
     }
 
 

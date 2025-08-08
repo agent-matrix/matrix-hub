@@ -6,6 +6,7 @@ This client wraps the HTTP endpoints exposed by the mcpgateway service:
 
   - POST /tools      → register new Tool definitions
   - POST /servers    → register MCP “servers”
+  - POST /gateways   → register MCP “gateways”
   - POST /resources  → register Resource definitions
   - POST /prompts    → register Prompt templates
   - GET  /tools, /servers, /resources, /prompts → list existing entities
@@ -21,12 +22,16 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Dict, Iterable, List, Optional, Union, TYPE_CHECKING
 
 import httpx
 from pathlib import Path
 from ..models import Entity
-from .install import StepResult
+
+# Typing-only import to avoid runtime cycles
+if TYPE_CHECKING:  # pragma: no cover
+    from .install import StepResult
+
 from ..config import settings
 from ..utils.jwt_helper import get_mcp_admin_token
 
@@ -123,6 +128,10 @@ class MCPGatewayClient:
     def create_prompt(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
         """POST /prompts with PromptCreate payload."""
         return self._post_json("/prompts", payload, ok_on_conflict=idempotent)
+
+    def create_gateway(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+        """POST /gateways with GatewayCreate payload."""
+        return self._post_json("/gateways", payload, ok_on_conflict=idempotent)
 
     def list_servers(self) -> List[Dict[str, Any]]:
         """GET /servers to list all registered servers."""
@@ -297,6 +306,12 @@ def register_prompts(prompts: Iterable[Dict[str, Any]], *, idempotent: bool = Fa
     return results
 
 
+def register_gateway(gateway_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    """Compatibility wrapper: registers a Gateway (POST /gateways)."""
+    logger.info("Registering gateway with MCP-Gateway (idempotent=%s)", idempotent)
+    return _client().create_gateway(gateway_spec, idempotent=idempotent)
+
+
 def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
     """
     Orchestrates two-step registration for servers/gateways:
@@ -361,6 +376,7 @@ def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) ->
         logger.error("Server/Gateway registration failed: %s", e)
         raise
 
+
 def trigger_discovery(server_id_or_response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """No-op shim for compatibility."""
     sid: Optional[str] = None
@@ -370,6 +386,7 @@ def trigger_discovery(server_id_or_response: Union[str, Dict[str, Any]]) -> Dict
         sid = str(server_id_or_response or "")
     logger.info("Discovery is automatic in this gateway (no-op). server_id=%s", sid)
     return {"status": "ok", "message": "Discovery happens automatically on gateway registration."}
+
 
 def gateway_health() -> Dict[str, Any]:
     """Convenience wrapper to probe the gateway health/ready endpoint."""
