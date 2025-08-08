@@ -191,4 +191,5 @@ log "  APP_MODULE=${APP_MODULE}"
 log "  LOG_LEVEL=${LOG_LEVEL}"
 
 exec "${HUB_UVICORN}" "${APP_MODULE}" --reload \
-  --host "${HUB_HOST}" --port "${HUB_PORT}" --proxy-headers
+  --host "${HUB_HOST}" --port "${HUB_PORT}" --proxy-headers \
+  --log-level debug

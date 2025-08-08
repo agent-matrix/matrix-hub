@@ -1,4 +1,3 @@
-#src/app.py
 """
 Matrix Hub — FastAPI application entrypoint.
 
@@ -15,6 +14,7 @@ import logging
 import sys
 import time
 import uuid
+import os
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
@@ -24,6 +24,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
+from .middleware.reqlog import RequestLogMiddleware  # NEW
 
 # --- Added: Alembic imports for DB migrations ---
 from alembic import command
@@ -151,9 +152,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Start the ingest scheduler (APScheduler-based)
     try:
-#        app.state.scheduler = ingest_scheduler.start_scheduler()
         app.state.scheduler = ingest_scheduler.start_scheduler(app)
-
         log.info("Ingest scheduler started.")
     except Exception:
         log.exception("Failed to start ingest scheduler.")
@@ -193,6 +192,8 @@ def create_app() -> FastAPI:
 
     # Middlewares
     app.add_middleware(RequestIdMiddleware)
+    # High-signal request/response logging (method, path, status, duration)
+    app.add_middleware(RequestLogMiddleware)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ALLOW_ORIGINS or ["*"],
@@ -249,7 +250,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=int(os.getenv("PORT", 7300)),
         log_level=settings.LOG_LEVEL.lower(),
-        reload=True,            # optional for dev
-        factory=False,          # app is an instance, not a factory function
+        reload=True,           # optional for dev
+        factory=False,         # app is an instance, not a factory function
     )
-

@@ -89,87 +89,117 @@ class RemoteIngestResult:
     embeddings_upserted: int = 0
 
 
-def _ingest_remote_old(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
-    log.info("Fetching index.json from %s", remote)
-    index = _fetch_json(remote)
-    manifest_urls = _extract_manifest_urls(index, base=remote)
-    res = RemoteIngestResult(manifests_seen=len(manifest_urls))
-
-    for m_url in manifest_urls:
-        try:
-            manifest = _fetch_and_parse_manifest(m_url)
-            manifest = _maybe_validate(manifest, source=m_url)
-
-            # 1) Save the raw manifest as an Entity row
-            entity = save_entity(manifest, db)
-            # 2) Then continue with your existing field‐mapping & embedding
-            entity = _upsert_entity_from_manifest(manifest, db=db, source_url=m_url)
-
-            res.entities_upserted += 1
-
-            if do_embed:
-                emb_count = _chunk_and_embed(entity=entity, manifest=manifest, db=db)
-                res.embeddings_upserted += emb_count
-        except SkipManifest as sk:
-            log.warning("Skipping manifest: %s (%s)", m_url, sk)
-        except Exception:
-            log.exception("Failed handling manifest: %s", m_url)
-    return res
-
-# src/services/ingest.py
-# ----------------- Add federated gateway re-registration after ingesting each remote server
+# ------------------------------------------------------------------------------
+# Ingest a single remote index (with detailed logging)
+# ------------------------------------------------------------------------------
 
 def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
-    log.info("Fetching index.json from %s", remote)
+    log = logging.getLogger("ingest")
+
+    log.debug("ingest.fetch.index", extra={"remote": remote})
     index = _fetch_json(remote)
     manifest_urls = _extract_manifest_urls(index, base=remote)
+
     res = RemoteIngestResult(manifests_seen=len(manifest_urls))
+    log.info(
+        "ingest.index.parsed",
+        extra={"remote": remote, "manifests_found": len(manifest_urls)},
+    )
 
     for m_url in manifest_urls:
         try:
+            log.debug("ingest.manifest.fetch", extra={"url": m_url})
             manifest = _fetch_and_parse_manifest(m_url)
             manifest = _maybe_validate(manifest, source=m_url)
+            log.debug(
+                "ingest.manifest.validated",
+                extra={
+                    "url": m_url,
+                    "type": manifest.get("type"),
+                    "id": manifest.get("id"),
+                    "version": manifest.get("version"),
+                },
+            )
 
-            # 1) Save the raw manifest as an Entity row
+            # 1) Save the raw manifest as an Entity row (idempotent upsert)
             entity = save_entity(manifest, db)
-            # 2) Then continue with your existing field‐mapping & embedding
+            log.info("ingest.entity.saved", extra={"uid": getattr(entity, "uid", None), "source_url": m_url})
+
+            # 2) Then continue with field‐mapping & enrichment (also sets source_url)
             entity = _upsert_entity_from_manifest(manifest, db=db, source_url=m_url)
+            log.debug("ingest.entity.upserted", extra={"uid": getattr(entity, "uid", None)})
 
             res.entities_upserted += 1
 
+            # 3) Optional chunk+embed path
             if do_embed:
                 emb_count = _chunk_and_embed(entity=entity, manifest=manifest, db=db)
                 res.embeddings_upserted += emb_count
+                log.info("ingest.embed", extra={"uid": getattr(entity, "uid", None), "chunks": emb_count})
 
-            # --- NEW: Re-register federated gateway in MCP-Gateway ---
-            from .gateway_client import register_server
-            if manifest.get("type") == "mcp_server":
-                # Build server_spec from the saved entity and manifest
-                remote_name = manifest.get("id") or entity.name
-                server_spec = {
-                    "name": manifest.get("name", remote_name),
-                    "description": manifest.get("description", ""),
-                    # point to SSE endpoint
-                    "url": manifest.get("url", remote).rstrip("/") + "/sse",
-                    "associated_tools": [tool.id for tool in entity.tools],      # adjust attribute access
-                    "associated_resources": [res.id for res in entity.resources],
-                    "associated_prompts": [pr.id for pr in entity.prompts],
-                }
-                try:
-                    register_server(server_spec, idempotent=True)
-                    log.info("✓ Federated gateway re-registered: %s", server_spec["name"])
-                except Exception as e:
-                    log.warning("⚠️  Failed to re-register gateway %s: %s", server_spec["name"], e)
-            # ----------------------------------------------------------
+            # 4) Optional: re-register federated gateway in MCP‑Gateway for mcp_server
+            try:
+                if manifest.get("type") == "mcp_server":
+                    from .gateway_client import register_server  # local import to avoid hard dep
+
+                    reg = (manifest or {}).get("mcp_registration") or {}
+                    server = reg.get("server") or {}
+                    payload = {
+                        "name": server.get("name") or (manifest.get("name") or manifest.get("id")),
+                        "description": server.get("description") or "",
+                        "url": (server.get("url") or "").rstrip("/"),
+                        "associated_tools": server.get("associated_tools") or [],
+                        "associated_resources": server.get("associated_resources") or [],
+                        "associated_prompts": server.get("associated_prompts") or [],
+                    }
+                    if payload["url"]:
+                        try:
+                            register_server(payload, idempotent=True)
+                            log.info(
+                                "ingest.gateway.register",
+                                extra={"uid": getattr(entity, "uid", None), "name": payload["name"], "ok": True},
+                            )
+                        except Exception as e:  # best‑effort; do not fail ingest
+                            log.warning(
+                                "ingest.gateway.register.error %s",
+                                e,
+                                extra={"uid": getattr(entity, "uid", None), "name": payload["name"]},
+                            )
+                    else:
+                        log.debug(
+                            "ingest.gateway.skip",
+                            extra={"uid": getattr(entity, "uid", None), "reason": "no server.url"},
+                        )
+            except Exception:
+                # Never break ingest due to gateway registration
+                log.exception(
+                    "ingest.gateway.unexpected",
+                    extra={"uid": getattr(entity, "uid", None), "url": m_url},
+                )
 
         except SkipManifest as sk:
-            log.warning("Skipping manifest: %s (%s)", m_url, sk)
+            log.warning("ingest.skip", extra={"url": m_url, "reason": str(sk)})
         except Exception:
-            log.exception("Failed handling manifest: %s", m_url)
-    # ← add this to save the result in the database
-    db.commit()  # Ensure all changes are saved before returning:        
-    #db.commit()        
+            log.exception("ingest.manifest.error", extra={"url": m_url})
+
+    # Commit at the end to persist everything we did
+    try:
+        db.commit()
+        log.info(
+            "ingest.commit",
+            extra={
+                "remote": remote,
+                "entities_upserted": res.entities_upserted,
+                "embeddings_upserted": res.embeddings_upserted,
+            },
+        )
+    except Exception:
+        db.rollback()
+        log.exception("ingest.commit.error", extra={"remote": remote})
+        raise
+
     return res
+
 
 
 # ----------------- Manifest fetch/parse/validate -----------------
@@ -434,11 +464,25 @@ def ingest_manifest(manifest: Dict[str, Any], db: Session, do_embed: bool = True
 # ------------------------------------------------------------------------------
 
 def ingest_index(db: Session, index_url: str) -> Dict[str, Any]:
-    """
-    Entry point expected by the /ingest endpoint:
-    Ingest a remote index.json URL.
-    """
-    return _ingest_remote(index_url, db=db, do_embed=True)
+    """Entry point expected by the /ingest endpoint: Ingest a remote index.json URL."""
+    log = logging.getLogger("ingest")
+    log.info("ingest.start", extra={"remote": index_url})
+    try:
+        res = _ingest_remote(index_url, db=db, do_embed=True)
+        log.info(
+            "ingest.end",
+            extra={
+                "remote": index_url,
+                "manifests": getattr(res, "manifests_seen", None),
+                "entities_upserted": getattr(res, "entities_upserted", None),
+                "embeddings_upserted": getattr(res, "embeddings_upserted", None),
+            },
+        )
+        return res
+    except Exception:
+        log.exception("ingest.error", extra={"remote": index_url})
+        raise
+
 
 # alias for backward-compatibility
 ingest_remote = ingest_index

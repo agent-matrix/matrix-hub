@@ -13,9 +13,10 @@ Returns Pydantic DTOs defined in src/schemas.py.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, List, Dict, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -199,6 +200,7 @@ def get_entity(
 )
 def install_entity_route(
     req: schemas.InstallRequest,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> schemas.InstallResponse:
     """
@@ -220,14 +222,14 @@ def install_entity_route(
     Two modes
     ---------
     1) Inline install (quick testing):
-       If `req.manifest` is provided, the endpoint installs directly from that
-       manifest — no database entity or prior ingest is required.
+        If `req.manifest` is provided, the endpoint installs directly from that
+        manifest — no database entity or prior ingest is required.
 
     2) DB-backed install (catalog flow):
-       If `req.manifest` is not provided, the endpoint expects the entity to
-       exist in the Hub database (after a successful /ingest). It resolves by
-       `req.id` (UID like `type:name@1.2.3`) and fetches the manifest from
-       `entity.source_url`.
+        If `req.manifest` is not provided, the endpoint expects the entity to
+        exist in the Hub database (after a successful /ingest). It resolves by
+        `req.id` (UID like `type:name@1.2.3`) and fetches the manifest from
+        `entity.source_url`.
 
     Error handling
     --------------
@@ -235,6 +237,11 @@ def install_entity_route(
     - Unexpected errors are returned as 500 with minimal detail.
     """
     try:
+        rid = getattr(getattr(request, "state", object()), "request_id", None)
+        logging.getLogger("route.install").info(
+            "install.request",
+            extra={"rid": rid, "uid": req.id, "inline": bool(req.manifest), "target": req.target},
+        )
         if req.manifest:
             # Inline install: bypass DB entity/source_url
             result = install_inline_manifest(
@@ -242,6 +249,7 @@ def install_entity_route(
                 uid=req.id,
                 manifest=req.manifest,
                 target=req.target,
+                source_url=req.source_url,
             )
         else:
             # Standard catalog flow: requires prior ingest
@@ -266,6 +274,14 @@ def install_entity_route(
             detail={"error": "InternalServerError", "reason": str(exc)},
         ) from exc
 
+    logging.getLogger("route.install").debug(
+        "install.response",
+        extra={
+            "rid": rid,
+            "uid": req.id,
+            "steps": [r.get("step") for r in (result.get("results") or [])],
+        },
+    )
     return schemas.InstallResponse(
         plan=result.get("plan"),
         results=result.get("results") or [],

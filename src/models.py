@@ -79,6 +79,9 @@ class Entity(Base):
     gateway_error: Mapped[Optional[str]] = mapped_column(
         String, nullable=True, default=None, comment="Error text from gateway.register"
     )
+    # record any gateway.register failure message here
+    gateway_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+
 
     tenant_id: Mapped[str] = mapped_column(String, nullable=False, default="public")
 
@@ -110,7 +113,7 @@ class Entity(Base):
         Index("ix_entity_created_at", "created_at"),
     )
     gateway_registered_at = Column(DateTime(timezone=True), nullable=True)
-    gateway_last_error    = Column(Text(),             nullable=True)
+
 
 class EmbeddingChunk(Base):
     """

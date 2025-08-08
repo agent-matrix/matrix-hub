@@ -112,7 +112,8 @@ class InstallRequest(BaseModel):
 
     # Optional inline manifest if you want to bypass DB entity/source_url
     manifest: Optional[Dict[str, Any]] = None
-
+    # Optional: provenance for inline installs so DB + lockfile can record where it came from
+    source_url: Optional[str] = None
 
 class InstallResponse(BaseModel):
     """

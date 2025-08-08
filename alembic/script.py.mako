@@ -46,7 +46,7 @@ def upgrade() -> None:
                   onupdate=sa.text("CURRENT_TIMESTAMP")),
         # NEW COLUMNS: track gateway registration state and errors
         sa.Column('gateway_registered_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('gateway_last_error', sa.Text(), nullable=True),
+        sa.Column('gateway_error', sa.Text(), nullable=True),
         # inline check constraint so SQLite doesn't need an ALTER later
         sa.CheckConstraint(
             "type in ('agent','tool','mcp_server')",

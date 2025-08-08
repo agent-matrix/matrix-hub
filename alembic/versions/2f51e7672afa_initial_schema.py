@@ -1,8 +1,8 @@
 """Initial schema
 
-Revision ID: '6285799e5740'
+Revision ID: '2f51e7672afa'
 Revises: 
-Create Date: 2025-08-07 23:38:19.607024
+Create Date: 2025-08-08 12:22:37.397001
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 # revision identifiers, used by Alembic.
-revision = '6285799e5740'
+revision = '2f51e7672afa'
 down_revision = None
 branch_labels = None
 depends_on = None
@@ -46,7 +46,7 @@ def upgrade() -> None:
                   onupdate=sa.text("CURRENT_TIMESTAMP")),
         # NEW COLUMNS: track gateway registration state and errors
         sa.Column('gateway_registered_at', sa.DateTime(timezone=True), nullable=True),
-        sa.Column('gateway_last_error', sa.Text(), nullable=True),
+        sa.Column('gateway_error', sa.Text(), nullable=True),
         # inline check constraint so SQLite doesn't need an ALTER later
         sa.CheckConstraint(
             "type in ('agent','tool','mcp_server')",

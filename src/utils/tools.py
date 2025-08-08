@@ -14,6 +14,7 @@ The inline install reuses helpers from install.py to ensure consistent behavior:
   - adapters writing
   - MCP-Gateway registration
   - lockfile writing
+  - (NEW) optional catalog save to DB for inline installs
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ from __future__ import annotations
 import logging
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
@@ -43,6 +44,7 @@ from ..services.install import (  # type: ignore
 
 # Entity model (local)
 from ..models import Entity
+from ..db import save_entity
 
 # Optional adapters support
 try:
@@ -54,10 +56,11 @@ log = logging.getLogger("install.utils")
 
 
 def install_inline_manifest(
-    db: Session,  # kept for API symmetry – not used directly today
+    db: Session,  # kept for API symmetry and (now) DB persist
     uid: str,
     manifest: Dict[str, Any],
     target: str,
+    source_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Perform a full install using an inline manifest, without requiring a DB Entity.
@@ -65,13 +68,13 @@ def install_inline_manifest(
     This function mirrors the DB-backed install flow in src/services/install.py,
     but operates entirely on the provided `manifest`. It executes artifact steps
     (pip/uv, docker, git, zip), writes adapters (if present), performs optional
-    MCP-Gateway registration via `mcp_registration`, and writes a lockfile.
+    MCP-Gateway registration via `mcp_registration`, writes a lockfile, and (NEW)
+    upserts the catalog Entity row so inline installs persist to the DB.
 
     Parameters
     ----------
     db : Session
-        SQLAlchemy session. Included for API consistency and possible future use
-        (e.g., vector/blob ops), but not used at present.
+        SQLAlchemy session.
     uid : str
         Full entity UID of the form "type:name@version" (e.g., "mcp_server:hello@0.1.0").
     manifest : Dict[str, Any]
@@ -79,13 +82,15 @@ def install_inline_manifest(
         "type", "id", and "version".
     target : str
         Target project directory where adapters and the lockfile should be written.
+    source_url : Optional[str]
+        The source URL where the manifest was fetched from, for logging.
 
     Returns
     -------
     Dict[str, Any]
         Dictionary containing:
           - "plan": simplified plan derived from the manifest
-          - "results": list of step results (artifacts, adapters, gateway registration, lockfile)
+          - "results": list of step results (artifacts, adapters, gateway registration, lockfile, catalog save)
           - "files_written": paths (relative to target) that were written
           - "lockfile": the lockfile data structure (also written to disk)
 
@@ -104,6 +109,8 @@ def install_inline_manifest(
 
     if not (mtype and mid and ver):
         raise InstallError("Inline manifest missing required keys: 'type', 'id', 'version'.")
+
+    log.debug("inline.start", extra={"uid": uid, "source_url": source_url, "target": target})
 
     # Create a pseudo-entity for consistent lockfile/plan shape
     ent = Entity(uid=uid, type=mtype, name=manifest.get("name") or "", version=ver)
@@ -135,6 +142,7 @@ def install_inline_manifest(
                 results.append(_install_zip(spec, tdir))
             else:
                 results.append(StepResult(step=step_name, ok=False, stderr=f"Unsupported artifact kind: {kind}"))
+            log.info("artifact.done", extra={"uid": uid, "step": step_name, "ok": results[-1].ok})
         except Exception as e:
             log.exception("Failed step %s", step_name)
             results.append(StepResult(step=step_name, ok=False, stderr=str(e)))
@@ -158,9 +166,22 @@ def install_inline_manifest(
             results.append(StepResult(step="gateway.register", ok=True, extra=reg_res))
         else:
             results.append(StepResult(step="gateway.register", ok=True, extra={"skipped": True}))
+        log.info("gateway.register", extra={"uid": uid, "ok": True, "skipped": reg_res is None})
     except Exception as e:
         log.exception("Gateway registration failed")
         results.append(StepResult(step="gateway.register", ok=False, stderr=str(e)))
+
+    # (NEW) Persist catalog entity to DB for inline installs
+    # Mirrors the DB-backed flow: map manifest → Entity row via save_entity()
+    try:
+        save_entity(manifest, db)
+        db.commit()
+        log.info("catalog.save", extra={"uid": uid, "ok": True})
+        results.append(StepResult(step="catalog.save", ok=True))
+    except Exception as e:
+        db.rollback()
+        log.exception("Failed to save inline entity to DB")
+        results.append(StepResult(step="catalog.save", ok=False, stderr=str(e)))
 
     # Lockfile
     lockfile_data = _build_lockfile(ent, manifest, artifacts)
@@ -172,6 +193,7 @@ def install_inline_manifest(
         log.exception("Failed to write lockfile")
         results.append(StepResult(step="lockfile.write", ok=False, stderr=str(e)))
 
+    log.debug("inline.end", extra={"uid": uid, "steps": [r.step for r in results]})
     return {
         "plan": plan,
         "results": [asdict(r) for r in results],

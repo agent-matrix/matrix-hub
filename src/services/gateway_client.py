@@ -4,10 +4,10 @@ Minimal client for MCP-Gateway (admin/public API).
 
 This client wraps the HTTP endpoints exposed by the mcpgateway service:
 
-  - POST /tools       → register new Tool definitions
-  - POST /servers     → register MCP “servers”
-  - POST /resources   → register Resource definitions
-  - POST /prompts     → register Prompt templates
+  - POST /tools      → register new Tool definitions
+  - POST /servers    → register MCP “servers”
+  - POST /resources  → register Resource definitions
+  - POST /prompts    → register Prompt templates
   - GET  /tools, /servers, /resources, /prompts → list existing entities
 
 Key behaviors:
@@ -24,16 +24,13 @@ import time
 from typing import Any, Dict, Iterable, List, Optional, Union
 
 import httpx
-import time
 from pathlib import Path
 from ..models import Entity
 from .install import StepResult
 from ..config import settings
 from ..utils.jwt_helper import get_mcp_admin_token
-#from .gateway_client import (_client, GatewayClientError)
 
-logger = logging.getLogger(__name__)
-
+logger = logging.getLogger("gateway.client")
 
 # --------------------------------------------------------------------------------------
 # Exceptions
@@ -61,7 +58,9 @@ class GatewayClientError(RuntimeError):
             f"body={self.body!r}>"
         )
 
-
+class InstallError(Exception):
+    """Raised when an installation or registration step is invalid or cannot proceed."""
+    pass
 # --------------------------------------------------------------------------------------
 # Core client
 # --------------------------------------------------------------------------------------
@@ -175,8 +174,11 @@ class MCPGatewayClient:
             headers = {**self._base_headers, "Authorization": f"Bearer {token}"}
 
             try:
+                logger.debug("gw.request", extra={"method": method, "url": url, "attempt": attempt})
                 with httpx.Client(timeout=self.timeout, headers=headers) as client:
                     resp = client.request(method, url, json=json_body, params=params)
+                
+                logger.info("gw.response", extra={"method": method, "url": url, "status": resp.status_code})
 
                 if resp.status_code >= 500:
                     raise httpx.HTTPStatusError(
@@ -200,11 +202,11 @@ class MCPGatewayClient:
 
             except httpx.HTTPStatusError as exc:
                 last_exc = exc
-                logger.warning("Attempt %d/%d: server error, retrying…", attempt, attempts)
+                logger.warning("gw.retry.server", extra={"attempt": attempt, "of": attempts, "status": getattr(exc.response, "status_code", None)})
                 self._sleep_backoff(attempt)
             except httpx.RequestError as exc:
                 last_exc = exc
-                logger.warning("Attempt %d/%d: network error (%s), retrying…", attempt, attempts, exc)
+                logger.warning("gw.retry.network", extra={"attempt": attempt, "of": attempts, "error": str(exc)})
                 self._sleep_backoff(attempt)
 
         if isinstance(last_exc, GatewayClientError):
@@ -247,98 +249,6 @@ def register_tool(tool_spec: Dict[str, Any], *, idempotent: bool = False) -> Dic
     logger.info("Registering tool with MCP-Gateway (idempotent=%s)", idempotent)
     return _client().create_tool(tool_spec, idempotent=idempotent)
 
-def register_server_old(server_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
-    """
-    Orchestrates two-step registration for servers/gateways:
-      1) create resources (inline or repo) and get numeric IDs
-      2) POST to /servers or /gateways based on presence of 'url'
-    """
-    client = _client()
-
-    # Step 1: resources
-    resource_ids: List[int] = []
-    for art in server_spec.get('artifacts', []):
-        spec = art.get('spec', {})
-        r_payload = {}
-        if art.get('kind') == 'inline':
-            path = spec.get('path')
-            with open(path, 'r', encoding='utf-8') as f:
-                code = f.read()
-            r_payload = {
-                'id': f"{server_spec['name']}-code",
-                'name': f"{server_spec['name']} code",
-                'type': 'inline',
-                'uri': f"file://{path}",
-                'content': code,
-            }
-        else:
-            r_payload = {
-                'id': spec.get('id', f"{server_spec['name']}-artifact"),
-                'name': spec.get('id', f"{server_spec['name']}-artifact"),
-                'type': spec.get('kind', ''),
-                'uri': spec.get('repo') or spec.get('url'),
-            }
-        try:
-            r_resp = client.create_resource(r_payload, idempotent=idempotent)
-            resource_ids.append(int(r_resp['id']))
-        except GatewayClientError as e:
-            logger.error("Failed to register resource: %s", e)
-            raise
-
-    # Step 2: server/gateway
-    payload = {
-        'name': server_spec.get('name'),
-        'description': server_spec.get('description', ''),
-        'associated_tools': server_spec.get('tools', []),
-        'associated_resources': resource_ids,
-        'associated_prompts': server_spec.get('prompts', []),
-    }
-    if 'url' in server_spec:
-        payload['url'] = server_spec['url']
-
-    try:
-        resp = client.create_server(payload, idempotent=idempotent)
-        return resp
-    except GatewayClientError as e:
-        logger.error("Server/Gateway registration failed: %s", e)
-        raise
-
-
-def register_resources_old(resources: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:
-    """Bulk helper to register resources (POST /resources per item)."""
-    client = _client()
-    results: List[Dict[str, Any]] = []
-    for r in resources or []:
-        try:
-            resp = client.create_resource(r, idempotent=idempotent)
-            # Expect numeric 'id'
-            if not isinstance(resp.get('id'), int):
-                raise GatewayClientError("Resource response missing numeric 'id'", status_code=None, body=resp)
-            results.append(resp)
-        except GatewayClientError as e:
-            logger.error("Resource registration failed: %s", e)
-            raise
-    return results
-
-
-def register_prompts_old(prompts: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:
-    """Bulk helper to register prompts (POST /prompts per item)."""
-    client = _client()
-    results: List[Dict[str, Any]] = []
-    for p in prompts or []:
-        try:
-            resp = client.create_prompt(p, idempotent=idempotent)
-            if not isinstance(resp.get('id'), int):
-                raise GatewayClientError("Prompt response missing numeric 'id'", status_code=None, body=resp)
-            results.append(resp)
-        except GatewayClientError as e:
-            logger.error("Prompt registration failed: %s", e)
-            raise
-    return results
-
-
-
-
 
 def register_resources(resources: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:
     """Bulk helper to register resources (POST /resources per item)."""
@@ -378,8 +288,8 @@ def register_prompts(prompts: Iterable[Dict[str, Any]], *, idempotent: bool = Fa
 def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
     """
     Orchestrates two-step registration for servers/gateways:
-      1) create resources (inline or repo) and get numeric IDs
-      2) POST to /servers or /gateways based on presence of 'url'
+        1) create resources (inline or repo) and get numeric IDs
+        2) POST to /servers or /gateways based on presence of 'url'
     """
     client = _client()
 
@@ -438,16 +348,6 @@ def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) ->
     except GatewayClientError as e:
         logger.error("Server/Gateway registration failed: %s", e)
         raise
-
-
-
-
-
-
-
-
-
-
 
 def trigger_discovery(server_id_or_response: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
     """No-op shim for compatibility."""
