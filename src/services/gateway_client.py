@@ -357,20 +357,57 @@ def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) ->
             logger.error("Failed to register resource '%s': %s", r_payload['id'], e)
             raise
 
-    # Step 2: compose server/gateway payload
+    # ------------------------------------------------------------------
+    # Step 2: compose payload (support BOTH flattened and manifest-shaped inputs)
+    # ------------------------------------------------------------------
+    srv = (server_spec.get('server') or {}) if isinstance(server_spec.get('server'), dict) else {}
+
+    name = srv.get('name', server_spec.get('name'))
+    description = srv.get('description', server_spec.get('description', ''))
+
+    # Prefer flattened associated_* if provided; otherwise derive from mcp_registration
+    assoc_tools = server_spec.get('associated_tools')
+    if assoc_tools is None:
+        assoc_tools = ((server_spec.get('mcp_registration') or {}).get('tool') or {}).get('id', [])
+    assoc_resources = server_spec.get('associated_resources', resource_ids or [])
+    if not assoc_resources:
+        assoc_resources = resource_ids or []
+    assoc_prompts = server_spec.get('associated_prompts', (server_spec.get('mcp_registration') or {}).get('prompts', []))
+
+    def _as_list(v):
+        if v is None:
+            return []
+        if isinstance(v, (list, tuple)):
+            return list(v)
+        return [v]
+
     payload: Dict[str, Any] = {
-        'name': server_spec.get('server', {}).get('name', server_spec.get('name')),
-        'description': server_spec.get('server', {}).get('description', ''),
-        'associated_tools': server_spec.get('mcp_registration', {}).get('tool', {}).get('id', []),
-        'associated_resources': resource_ids,
-        'associated_prompts': server_spec.get('mcp_registration', {}).get('prompts', []),
+        'name': name,
+        'description': description,
+        'associated_tools': _as_list(assoc_tools),
+        'associated_resources': _as_list(assoc_resources),
+        'associated_prompts': _as_list(assoc_prompts),
     }
-    srv = server_spec.get('server', {})
-    if srv.get('url'):
-        payload['url'] = srv['url']
+
+    # Determine URL presence from flat or nested shape
+    url = server_spec.get('url') or srv.get('url')
+    transport = (server_spec.get('transport') or srv.get('transport') or '').upper()
+    if url:
+        url = url.rstrip('/')
+        # Normalize SSE to /messages/
+        if transport == 'SSE' and not url.endswith('/messages/'):
+            if url.endswith('/messages'):
+                url = f"{url}/"
+            else:
+                url = f"{url}/messages/"
+        payload['url'] = url
 
     try:
-        resp = client.create_server(payload, idempotent=idempotent)
+        # Route correctly: URL present => Federated Gateway, else Virtual Server
+        if payload.get('url'):
+            resp = client.create_gateway(payload, idempotent=idempotent)
+        else:
+            resp = client.create_server(payload, idempotent=idempotent)
         return resp
     except GatewayClientError as e:
         logger.error("Server/Gateway registration failed: %s", e)
