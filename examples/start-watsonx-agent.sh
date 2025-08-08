@@ -1,23 +1,33 @@
 #!/usr/bin/env bash
-# examples/add_watsonx-local-server.sh
-set -Eeuo pipefail
+# A simple script to start the watsonx-agent server.
 
-: "${HUB_URL:?Set HUB_URL (e.g., http://127.0.0.1:7300)}"
-: "${ADMIN_TOKEN:?Set ADMIN_TOKEN equal to the Hub's API_TOKEN}"
+# --- Determine directories ---
+# Get the directory where this script lives
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Assume .venv is at the repo root (one level above SCRIPT_DIR if SCRIPT_DIR is in examples/)
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# Where the agent project itself lives
+PROJECT_DIR="$REPO_ROOT/examples/agents/watsonx-agent"
+# Virtualenv location
+VENV_DIR="$REPO_ROOT/.venv"
 
-INDEX_URL="${INDEX_URL:-http://127.0.0.1:8000/matrix/index.json}"
+# --- Script Execution ---
+echo "Navigating to the project directory..."
+cd "$PROJECT_DIR" || {
+  echo "Error: Could not change to directory $PROJECT_DIR. Please check the path."
+  exit 1
+}
 
-echo "▶ Registering remote with Hub: ${INDEX_URL}"
-curl -fsS -X POST "${HUB_URL%/}/remotes" \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "$(jq -nc --arg url "${INDEX_URL}" '{url:$url}') " \
-  || true
+echo "Activating Python virtual environment from $VENV_DIR..."
+if [ -f "$VENV_DIR/bin/activate" ]; then
+  # shellcheck disable=SC1090
+  source "$VENV_DIR/bin/activate"
+else
+  echo "Error: Virtualenv not found at $VENV_DIR/bin/activate"
+  exit 1
+fi
 
-echo "▶ Ingesting & syncing via /remotes/sync"
-curl -fsS -X POST "${HUB_URL%/}/remotes/sync" \
-  -H "Authorization: Bearer ${ADMIN_TOKEN}" \
-  -H "Content-Type: application/json" \
-  || true
+echo "Starting the watsonx-agent server..."
+python server.py
 
-echo "✅ Done. Check Hub logs for gw.request/gw.response for POST /gateways"
+echo "Server has been stopped."
