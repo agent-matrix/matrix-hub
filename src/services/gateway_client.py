@@ -26,11 +26,10 @@ from typing import Any, Dict, Iterable, List, Optional, Union, TYPE_CHECKING
 
 import httpx
 from pathlib import Path
-from ..models import Entity
 
 # Typing-only import to avoid runtime cycles
 if TYPE_CHECKING:  # pragma: no cover
-    from .install import StepResult
+    pass
 
 from ..config import settings
 from ..utils.jwt_helper import get_mcp_admin_token

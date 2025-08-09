@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional, Set
 from dataclasses import asdict
+from typing import Any, Dict, List, Optional, Set
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy.orm import Session
@@ -11,9 +12,9 @@ from sqlalchemy.orm import Session
 from ..config import settings
 from ..db import get_db
 from ..models import Remote
-from ..utils.security import require_api_token
 from ..services.ingest import ingest_index
 from ..services.install import sync_registry_gateways
+from ..utils.security import require_api_token
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["remotes"])
@@ -44,7 +45,7 @@ class RemoteCreateResponse(BaseModel):
 
 class RemoteDeleteResponse(BaseModel):
     removed: bool
-    url: str
+    url: HttpUrl  # Corrected from str to HttpUrl for consistency
     total: int
 
 
@@ -68,20 +69,7 @@ class IngestResponse(BaseModel):
     results: List[IngestItemResult]
 
 
-
-class RemoteCreateRequest(BaseModel):
-    url: HttpUrl
-
-
-class RemoteCreateResponse(BaseModel):
-    added: bool
-    url: HttpUrl
-    total: int
-
-class RemoteDeleteResponse(BaseModel):
-    removed: bool
-    url: HttpUrl
-    total: int
+# NOTE: The duplicate class definitions that were here have been removed.
 
 
 # --------------------------------------------------------------------------------------
@@ -148,10 +136,10 @@ def sync_remotes(db: Session = Depends(get_db)):
     for url in remotes:
         try:
             ingest_index(db=db, index_url=url)
-            db.commit()                    # Persist ingest results immediately
+            db.commit()                      # Persist ingest results immediately
             success.append(url)
         except Exception as e:
-            db.rollback()                  # Undo partial work for this URL
+            db.rollback()                    # Undo partial work for this URL
             log.warning("Ingest failed for %s: %s", url, e)
             failures[url] = str(e)
 
@@ -173,8 +161,6 @@ def sync_remotes(db: Session = Depends(get_db)):
         "synced": synced,
         "count": len(remotes),
     }
-
-
 
 
 @router.get("/remotes", response_model=RemoteListResponse)
@@ -250,7 +236,6 @@ def delete_remote(
     # Return updated total
     total = db.query(Remote).count()
     return RemoteDeleteResponse(removed=True, url=req.url, total=total)
-
 
 
 @router.post(

@@ -209,7 +209,7 @@ def save_entity(manifest: dict, session: Session) -> Entity:
     try:
         session.commit()
         logging.getLogger("db").info("db.entity.commit", extra={"uid": uid})
-    except IntegrityError as e:
+    except IntegrityError:
         session.rollback()
         logging.getLogger("db").exception("db.entity.integrity_error", extra={"uid": uid})
         raise
