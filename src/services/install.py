@@ -33,7 +33,7 @@ import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 import httpx
 import yaml
@@ -583,78 +583,6 @@ def _normalize_mcp_registration(reg: Dict[str, Any]) -> Dict[str, Any]:
         server["transport"] = str(server["transport"]).upper()
 
     return out
-
-
-def _maybe_register_gateway_old(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """
-    Best-effort registration of tools, resources, servers, gateways, and prompts.
-    Returns a dict of results & errors—never raises.
-    """
-    reg_raw = manifest.get("mcp_registration") or {}
-    if not isinstance(reg_raw, dict) or not reg_raw:
-        return None
-
-    reg = _normalize_mcp_registration(reg_raw)
-    results: Dict[str, Any] = {}
-
-    # 1) Tools
-    tool_spec = reg.get("tool")
-    tool_id: Optional[Union[int, str]] = None
-    if tool_spec and register_tool:
-        try:
-            tool_resp = register_tool(tool_spec, idempotent=True)
-            results["tool"] = tool_resp
-            tool_id = tool_resp.get("id") or tool_spec.get("id")
-        except Exception as e:
-            results["tool_error"] = str(e)
-
-    # 2) Resources → create or lookup to get numeric IDs
-    resource_specs = reg.get("resources") or []
-    resource_ids: List[int] = []
-    if resource_specs and register_resources:
-        for r_spec in resource_specs:
-            try:
-                resp_list = register_resources([r_spec], idempotent=True)
-                rec = resp_list[0]
-                resource_ids.append(rec.get("id"))
-                results.setdefault("resources", []).append(rec)
-            except Exception as e:
-                results.setdefault("resources_error", []).append(str(e))
-
-    # 3) Prompts → create or lookup to get numeric IDs
-    prompt_specs = reg.get("prompts") or []
-    prompt_ids: List[int] = []
-    if prompt_specs and register_prompts:
-        for p_spec in prompt_specs:
-            try:
-                resp_list = register_prompts([p_spec], idempotent=True)
-                rec = resp_list[0]
-                prompt_ids.append(rec.get("id"))
-                results.setdefault("prompts", []).append(rec)
-            except Exception as e:
-                results.setdefault("prompts_error", []).append(str(e))
-
-    # 4) Server or Gateway
-    server_spec = reg.get("server")
-    if isinstance(server_spec, dict) and register_server:
-        try:
-            payload: Dict[str, Any] = {
-                "name": server_spec.get("name"),
-                "description": server_spec.get("description", ""),
-                "associated_tools": [tool_id] if tool_id is not None else [],
-                "associated_resources": resource_ids,
-                "associated_prompts": prompt_ids,
-            }
-            if "url" in server_spec:
-                payload["url"] = server_spec.get("url")
-                key = "gateway"
-            else:
-                key = "server"
-            results[key] = register_server(payload, idempotent=True)
-        except Exception as e:
-            results[f"{key}_error"] = str(e)
-
-    return results
 
 def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """
