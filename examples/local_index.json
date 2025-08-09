@@ -1,0 +1,5 @@
+{
+  "manifests": [
+    "examples/manifests/watsonx.manifest.json"
+  ]
+}

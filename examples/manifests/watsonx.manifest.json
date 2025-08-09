@@ -1,0 +1,34 @@
+{
+  "type": "mcp_server",
+  "id": "watsonx-agent",
+  "name": "Watsonx Chat Agent",
+  "version": "0.1.0",
+  "description": "An MCP server that chats via IBM watsonx.ai.",
+  "mcp_registration": {
+    "tool": {
+      "id": "watsonx-chat",
+      "name": "watsonx-chat",
+      "description": "Chat with IBM watsonx.ai",
+      "integration_type": "MCP"
+    },
+    "resources": [
+      {
+        "id": "watsonx-agent-code",
+        "name": "Watsonx MCP server source",
+        "type": "inline",
+        "uri": "file://server.py",
+        "content": "Inline code or reference only"
+      }
+    ],
+    "prompts": [],
+    "server": {
+      "name": "watsonx-mcp",
+      "description": "Watsonx SSE server",
+      "transport": "SSE",
+      "url": "http://127.0.0.1:6288/",
+      "associated_tools": ["watsonx-chat"],
+      "associated_resources": ["watsonx-agent-code"],
+      "associated_prompts": []
+    }
+  }
+}
