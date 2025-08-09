@@ -205,7 +205,7 @@ def install_entity(
 
     # 1) Persist catalog record in its own transaction
     try:
-        save_entity(db, manifest)       # map manifest → Entity row
+        save_entity(manifest=manifest, session=db)
         db.commit()
         log.info("✔ Saved Entity[%s] to catalog DB", uid)
     except Exception:
