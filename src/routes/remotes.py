@@ -11,10 +11,11 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import Remote
+from ..models import Remote, Entity  
 from ..services.ingest import ingest_index
 from ..services.install import sync_registry_gateways
 from ..utils.security import require_api_token
+# --------------------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["remotes"])
@@ -68,6 +69,21 @@ class IngestItemResult(BaseModel):
 class IngestResponse(BaseModel):
     results: List[IngestItemResult]
 
+
+# --- add these Pydantic models alongside the others in this file ---
+class PendingGatewayItem(BaseModel):
+    uid: str
+    name: str
+    version: str
+    source_url: Optional[str] = None
+    has_registration: bool
+    server_url: Optional[str] = None
+    transport: Optional[str] = None
+    gateway_error: Optional[str] = None  # shows last sync error, if any
+
+class PendingGatewaysResponse(BaseModel):
+    items: List[PendingGatewayItem]
+    count: int
 
 # NOTE: The duplicate class definitions that were here have been removed.
 
@@ -162,6 +178,52 @@ def sync_remotes(db: Session = Depends(get_db)):
         "count": len(remotes),
     }
 
+# --- add this endpoint (e.g., after /remotes/sync) ---
+@router.get(
+    "/gateways/pending",
+    response_model=PendingGatewaysResponse,
+    dependencies=[Depends(require_api_token)],
+)
+def list_pending_gateways(
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+) -> PendingGatewaysResponse:
+    """
+    List all ingested MCP servers that have NOT been registered in MCP-Gateway yet
+    (Entity.type == 'mcp_server' AND gateway_registered_at IS NULL).
+
+    Useful to verify what will be picked up by sync_registry_gateways().
+    """
+    q = (
+        db.query(Entity)
+          .filter(
+              Entity.type == "mcp_server",
+              Entity.gateway_registered_at.is_(None),
+          )
+          .order_by(Entity.created_at.desc())
+    )
+    rows = q.limit(max(1, min(limit, 1000))).offset(max(0, offset)).all()
+
+    items: List[PendingGatewayItem] = []
+    for ent in rows:
+        reg = getattr(ent, "mcp_registration", {}) or {}
+        server = reg.get("server") if isinstance(reg, dict) else {}
+        url = server.get("url") if isinstance(server, dict) else None
+        transport = (server.get("transport") or "").upper() if isinstance(server, dict) else None
+
+        items.append(PendingGatewayItem(
+            uid=ent.uid,
+            name=ent.name,
+            version=ent.version,
+            source_url=ent.source_url,
+            has_registration=bool(reg),
+            server_url=url,
+            transport=transport,
+            gateway_error=getattr(ent, "gateway_error", None),
+        ))
+
+    return PendingGatewaysResponse(items=items, count=len(items))
 
 @router.get("/remotes", response_model=RemoteListResponse)
 def list_remotes(db: Session = Depends(get_db)) -> RemoteListResponse:
