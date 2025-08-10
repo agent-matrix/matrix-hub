@@ -50,3 +50,4 @@ matrix.lock.json
 /vendor
 /data/blobs
 /data/blobs
+matrix.lock.json

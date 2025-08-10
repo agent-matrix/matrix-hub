@@ -85,6 +85,25 @@ class PendingGatewaysResponse(BaseModel):
     items: List[PendingGatewayItem]
     count: int
 
+
+# --- Pydantic models for delete operations ---
+class PendingDeleteResponse(BaseModel):
+    removed: bool
+    uid: str
+    reason: Optional[str] = None
+
+class PendingBulkDeleteRequest(BaseModel):
+    uids: Optional[List[str]] = None          # delete these specific UIDs
+    all: Optional[bool] = False               # or set true to delete all pending
+    error_only: Optional[bool] = False        # restrict to those with gateway_error
+
+class PendingBulkDeleteResponse(BaseModel):
+    removed: List[str]
+    skipped: Dict[str, str]
+    total_removed: int
+
+
+
 # NOTE: The duplicate class definitions that were here have been removed.
 
 
@@ -224,6 +243,102 @@ def list_pending_gateways(
         ))
 
     return PendingGatewaysResponse(items=items, count=len(items))
+
+@router.delete(
+    "/gateways/pending/{uid}",
+    response_model=PendingDeleteResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_api_token)],
+)
+def delete_pending_gateway(uid: str, db: Session = Depends(get_db)) -> PendingDeleteResponse:
+    """
+    Delete a single *pending* mcp_server by UID.
+    Will not delete if not found, not mcp_server, or already registered.
+    """
+    ent = db.get(Entity, uid)
+    if not ent:
+        return PendingDeleteResponse(removed=False, uid=uid, reason="not found")
+    if ent.type != "mcp_server":
+        return PendingDeleteResponse(removed=False, uid=uid, reason="not an mcp_server")
+    if ent.gateway_registered_at is not None:
+        return PendingDeleteResponse(removed=False, uid=uid, reason="already registered")
+
+    try:
+        db.delete(ent)   # embedding_chunk rows cascade via FK ondelete='CASCADE'
+        db.commit()
+        return PendingDeleteResponse(removed=True, uid=uid)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Delete failed: {e}")
+
+@router.post(
+    "/gateways/pending/delete",
+    response_model=PendingBulkDeleteResponse,
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(require_api_token)],
+)
+def bulk_delete_pending_gateways(
+    req: PendingBulkDeleteRequest,
+    db: Session = Depends(get_db),
+) -> PendingBulkDeleteResponse:
+    """
+    Bulk-delete pending mcp_servers.
+    Provide either a list of UIDs or set all=true.
+    Optionally error_only=true to delete only those with gateway_error set.
+    """
+    if not (req.all or (req.uids and len(req.uids) > 0)):
+        raise HTTPException(status_code=400, detail="Provide uids or set all=true")
+
+    q = (
+        db.query(Entity)
+          .filter(
+              Entity.type == "mcp_server",
+              Entity.gateway_registered_at.is_(None),
+          )
+    )
+    if req.error_only:
+        q = q.filter(Entity.gateway_error.isnot(None))
+    if req.uids:
+        q = q.filter(Entity.uid.in_(req.uids))
+
+    rows = q.all()
+    removed: List[str] = []
+    skipped: Dict[str, str] = {}
+
+    try:
+        for ent in rows:
+            db.delete(ent)
+            removed.append(ent.uid)
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Bulk delete failed: {e}")
+
+    # If the caller provided specific UIDs, report any that we didn't remove and why.
+    if req.uids:
+        requested = set(req.uids)
+        deleted = set(removed)
+        for u in sorted(requested - deleted):
+            ent = db.get(Entity, u)
+            if ent is None:
+                skipped[u] = "not found"
+            elif ent.type != "mcp_server":
+                skipped[u] = "not an mcp_server"
+            elif ent.gateway_registered_at is not None:
+                skipped[u] = "already registered"
+            elif req.error_only and not ent.gateway_error:
+                skipped[u] = "no gateway_error"
+            else:
+                skipped[u] = "not selected"
+
+    return PendingBulkDeleteResponse(
+        removed=removed,
+        skipped=skipped,
+        total_removed=len(removed),
+    )
+
+# --------------------------------------------------------------------------------------
+# CRUD operations for remotes
 
 @router.get("/remotes", response_model=RemoteListResponse)
 def list_remotes(db: Session = Depends(get_db)) -> RemoteListResponse:

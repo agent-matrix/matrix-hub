@@ -3,8 +3,8 @@
     {
       "adapters": [],
       "artifacts": [],
-      "id": "mcp_server:watsonx-agent@0.1.0",
-      "name": "Watsonx Chat Agent",
+      "id": "mcp_server:random_number_mcp-agent@0.1.0",
+      "name": "Random_Number_Mcp",
       "provenance": {
         "source_url": null
       },
