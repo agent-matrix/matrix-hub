@@ -253,12 +253,21 @@ def session_scope() -> Generator[Session, None, None]:
         session.close()
 
 
-def save_entity(manifest: dict, session: Session) -> Entity:
-    """Insert or update an Entity record based on the provided manifest dictionary.
-
-    NOTE: This function **commits** the session. For batch ingest, prefer to call a
-    non-committing variant inside a `session_scope()` and commit in batches.
+def _coalesce(new, old):
+    """Return `new` if it is not None/empty-string; otherwise return `old`.
+    Keeps existing DB value when incoming manifest omits or sends empty fields.
     """
+    if new is None:
+        return old
+    if isinstance(new, str) and new == "":
+        return old
+    return new
+
+
+# --- helpers ---------------------------------------------------------------
+
+def upsert_entity(manifest: dict, session: Session) -> Entity:
+    """Insert/update an Entity **without** committing (caller controls txn)."""
     uid = f"{manifest['type']}:{manifest['id']}@{manifest['version']}"
     entity = session.query(Entity).filter_by(uid=uid).first()
     if entity is None:
@@ -267,20 +276,76 @@ def save_entity(manifest: dict, session: Session) -> Entity:
             type=manifest.get("type"),
             name=manifest.get("name"),
             version=manifest.get("version"),
-            # extend with additional fields as required
         )
         session.add(entity)
     else:
-        # Update mutable fields
         entity.name = manifest.get("name")
         entity.version = manifest.get("version")
 
-    try:
-        session.commit()
-        logging.getLogger("db").info("db.entity.commit", extra={"uid": uid})
-    except IntegrityError:
-        session.rollback()
-        logging.getLogger("db").exception("db.entity.integrity_error", extra={"uid": uid})
-        raise
+    # richer fields (keep existing if incoming is None/"")
+    entity.summary          = _coalesce(manifest.get("summary"),          getattr(entity, "summary", None))
+    entity.description      = _coalesce(manifest.get("description"),      getattr(entity, "description", None))
+    entity.license          = _coalesce(manifest.get("license"),          getattr(entity, "license", None))
+    entity.homepage         = _coalesce(manifest.get("homepage"),         getattr(entity, "homepage", None))
+    entity.source_url       = _coalesce(manifest.get("source_url"),       getattr(entity, "source_url", None))
+    entity.capabilities     = _coalesce(manifest.get("capabilities"),     getattr(entity, "capabilities", None))
+    entity.frameworks       = _coalesce(manifest.get("frameworks"),       getattr(entity, "frameworks", None))
+    entity.providers        = _coalesce(manifest.get("providers"),        getattr(entity, "providers", None))
+    entity.mcp_registration = _coalesce(manifest.get("mcp_registration"), getattr(entity, "mcp_registration", None))
+    return entity
 
+
+def _derive_tool_from_manifest_inline(manifest: dict, session: Session) -> None:
+    """Derive a `tool` entity from an MCP server manifest (no commit here)."""
+    if not getattr(settings, "DERIVE_TOOLS_FROM_MCP", False):
+        return
+    if manifest.get("type") != "mcp_server":
+        return
+
+    reg = manifest.get("mcp_registration") or {}
+    tool = reg.get("tool")
+    if not tool:
+        return
+
+    tool_manifest = {
+        "type": "tool",
+        "id": tool.get("id") or f"{manifest['id']}-tool",
+        "name": tool.get("name") or manifest.get("name"),
+        "version": manifest.get("version"),
+        "summary": tool.get("description") or manifest.get("summary") or "",
+        "description": tool.get("description") or "",
+        "capabilities": manifest.get("capabilities"),
+        "frameworks": manifest.get("frameworks"),
+        "providers": manifest.get("providers"),
+        "source_url": manifest.get("source_url"),
+    }
+    upsert_entity(tool_manifest, session)  # no commit
+
+
+# --- main entrypoint -------------------------------------------------------
+
+def save_entity(
+    manifest: dict,
+    session: Session,
+    *,
+    derive_tools: bool = True,
+    commit: bool = True,
+) -> Entity:
+    """
+    Upsert the primary entity; optionally derive and upsert a related `tool` entity;
+    commit once (atomic). Set `commit=False` if you batch elsewhere.
+    """
+    entity = upsert_entity(manifest, session)
+
+    if derive_tools:
+        _derive_tool_from_manifest_inline(manifest, session)
+
+    if commit:
+        try:
+            session.commit()
+            logging.getLogger("db").info("db.entity.commit", extra={"uid": entity.uid})
+        except IntegrityError:
+            session.rollback()
+            logging.getLogger("db").exception("db.entity.integrity_error", extra={"uid": entity.uid})
+            raise
     return entity

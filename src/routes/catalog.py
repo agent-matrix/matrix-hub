@@ -47,9 +47,6 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     reranker = None  # type: ignore
 
-# Installer service
-
-
 router = APIRouter(prefix="/catalog")
 
 
@@ -110,38 +107,52 @@ def search_catalog(
     limit: int = Query(20, ge=1, le=100),
     with_rag: bool = Query(False, description="Return short 'fit_reason' from top chunks"),
     rerank_mode: schemas.RerankMode = Query(settings.RERANK_DEFAULT.value, alias="rerank", description="none|llm"),
+    include_pending: bool = Query(False, description="Include entities that are not yet registered with Gateway (dev/debug)"),
     db: Session = Depends(get_db),
 ) -> schemas.SearchResponse:
     filters = _parse_filters(type, capabilities, frameworks, providers)
 
+    # Common filters forwarded to backends
+    base_filters = {
+        "type": filters["type"] or None,
+        "capabilities": filters["capabilities"],
+        "frameworks": filters["frameworks"],
+        "providers": filters["providers"],
+        "limit": max(limit, 50),
+    }
+
     # Lexical (BM25/pg_trgm) unless semantic-only
     lex_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.semantic:
-        lex_kwargs = {
-            "type": filters["type"] or None,
-            "capabilities": filters["capabilities"],
-            "frameworks": filters["frameworks"],
-            "providers": filters["providers"],
-            "limit": max(limit, 50),
-        }
-        # Avoid passing db to Null backends
-        if "Null" not in lexical.__class__.__name__:
-            lex_kwargs["db"] = db
-        lex_hits = lexical.search(q, **lex_kwargs)
+        if getattr(settings, "SEARCH_LEXICAL_BACKEND", "none").lower() == "none":
+            # Dev/SQLite path: engine wrapper falls back to LIKE search and respects include_pending
+            lex_hits = engine.run_keyword(
+                db=db,
+                q=q,
+                types=([filters["type"]] if filters["type"] else None),
+                include_pending=include_pending,
+                limit=max(limit, 50),
+                offset=0,
+            )
+        else:
+            # Existing prod path (pg_trgm or other configured backend)
+            lex_kwargs = dict(base_filters)
+            # Forward the dev switch for backends that support it (prod-safe default False)
+            lex_kwargs["include_pending"] = include_pending
+            # Avoid passing db to Null backends
+            if "Null" not in lexical.__class__.__name__:
+                lex_kwargs["db"] = db
+            lex_hits = lexical.search(q, **lex_kwargs)
 
-    # Vector (ANN) unless keyword-only
+    # Vector (ANN) unless keyword-only — keep signature strict (no include_pending kw for Null backends)
     vec_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.keyword:
         q_vec = embedder.encode([q])[0]
-        vec_kwargs = {
-            "type": filters["type"] or None,
-            "capabilities": filters["capabilities"],
-            "frameworks": filters["frameworks"],
-            "providers": filters["providers"],
-            "limit": max(limit, 50),
-        }
-        # Avoid passing db to Null backends
-        if "Null" not in vector.__class__.__name__:
+        vec_kwargs = dict(base_filters)
+        if "Null" in vector.__class__.__name__:
+            # Defensive: ensure unsupported keys are not present for Null backends
+            vec_kwargs.pop("include_pending", None)
+        else:
             vec_kwargs["db"] = db
         vec_hits = vector.search(q_vec, **vec_kwargs)
 

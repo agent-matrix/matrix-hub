@@ -40,7 +40,7 @@ import yaml
 from sqlalchemy.orm import Session
 
 from ..models import Entity
-
+from src.db import save_entity
 # Optional dependencies (best-effort usage)
 try:
     from .adapters import write_adapters  # type: ignore

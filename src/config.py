@@ -187,6 +187,10 @@ class Settings(BaseSettings):
 
     INGEST_SCHED_ENABLED: bool = False  # API-safe default (scheduler off by default)
 
+    DERIVE_TOOLS_FROM_MCP: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DERIVE_TOOLS_FROM_MCP", "derive_tools_from_mcp"),
+    )
 
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
