@@ -59,7 +59,7 @@ try:
     )
 except Exception:  # pragma: no cover
     register_tool = register_server = register_resources = register_prompts = register_gateway = trigger_discovery = None  # type: ignore
-from ..db import save_entity
+
 log = logging.getLogger("install")
 
 

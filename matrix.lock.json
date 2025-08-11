@@ -3,8 +3,8 @@
     {
       "adapters": [],
       "artifacts": [],
-      "id": "mcp_server:watsonx-agent@0.1.0",
-      "name": "Watsonx Chat Agent",
+      "id": "mcp_server:hello-sse-server@0.1.0",
+      "name": "Hello World MCP (SSE)",
       "provenance": {
         "source_url": null
       },
