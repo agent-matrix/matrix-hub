@@ -35,6 +35,8 @@ from ..services.search import (  # type: ignore
     embedder,
     blobstore,
 )
+# Engine wrapper (adds dev/SQLite fallback when SEARCH_LEXICAL_BACKEND=none)
+from ..services.search import engine
 
 # Optional RAG and reranker (guarded)
 try:  # pragma: no cover
