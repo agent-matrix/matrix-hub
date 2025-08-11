@@ -229,6 +229,91 @@ docker run -d --name matrix-hub \
 * **Gateway env:** `mcpgateway/.env` (from gateway setup)
 * **Volumes:** `/app/data`, optional `/app/mcpgateway/.state`
 
+
+## Production
+
+This section shows a **simple, repeatable** way to build and run Matrix Hub + MCP‑Gateway for production using Postgres, split API/Worker roles, and the new prod build script.
+
+### 1) Build a production image
+
+Use the new helper (recommended):
+
+```bash
+# Builds with a versioned tag by default: YYYYMMDD-<gitsha>
+./scripts/build_container_prod.sh
+
+# Or customize name/tag/Dockerfile
+IMAGE_NAME=matrixhub IMAGE_TAG=1.0.0 ./scripts/build_container_prod.sh
+DOCKERFILE=Dockerfile ./scripts/build_container_prod.sh
+```
+
+Push to your registry (optional):
+
+```bash
+docker tag matrixhub:1.0.0 registry.example.com/ai/matrixhub:1.0.0
+docker push registry.example.com/ai/matrixhub:1.0.0
+```
+
+### 2) Prepare environment files
+
+* **Hub (.env)** — copy from `.env.example`, then set at least:
+
+  ```env
+  DATABASE_URL=postgresql+psycopg://matrix:matrix@db:5432/matrixhub
+  LOG_LEVEL=INFO
+  # For API instances (no scheduler):
+  INGEST_SCHED_ENABLED=false
+  ```
+* **Gateway (.env.gateway)** — copy from `.env.gateway.example`. You can keep the default SQLite or point to Postgres:
+
+  ```env
+  # Example (optional):
+  # DATABASE_URL=postgresql+psycopg://matrix:matrix@db:5432/mcpgateway
+  ```
+
+### 3) Bring up the production stack (Compose)
+
+A production compose file typically defines four services: `db` (Postgres), `api` (Hub HTTP), `worker` (ingest scheduler), and `gateway`. Once your `docker-compose.prod.yml` is in place:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+* **API** listens on `:7300` with `INGEST_SCHED_ENABLED=false`.
+* **Worker** runs the same app with `INGEST_SCHED_ENABLED=true` (no public port required).
+* **Gateway** listens on `:4444` (optional if you use an external gateway).
+
+Check health:
+
+```bash
+curl -f http://localhost:7300/ | jq
+curl -f http://localhost:4444/ | jq  # if you run the gateway service
+```
+
+### 4) Scale and upgrade safely
+
+* Scale API (stateless) for more throughput/HA:
+
+  ```bash
+  docker compose -f docker-compose.prod.yml up -d --scale api=3
+  # or tune Gunicorn workers via WEB_CONCURRENCY/HUB_WORKERS
+  ```
+* Rolling upgrade:
+
+  ```bash
+  ./scripts/build_container_prod.sh  # new tag
+  # update the image tag in docker-compose.prod.yml or set IMAGE_TAG env
+  docker compose -f docker-compose.prod.yml up -d --build
+  ```
+
+### 5) Expectations in production
+
+* **Database**: Postgres is required for real concurrency; dev SQLite is fine with WAL+timeouts.
+* **Migrations**: Hub applies Alembic migrations on startup (already wired). Ensure DB connectivity.
+* **Split roles**: Keep search responsive by running API and Worker as **separate processes/containers**.
+* **Secrets**: Provide DB/Gateway tokens via environment or orchestrator secrets (do not bake into images).
+* **Proxy/TLS**: Place API and Gateway behind a reverse proxy/ingress that handles TLS, timeouts, and health checks.
+
 ---
 
 *End of document.*

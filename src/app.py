@@ -150,10 +150,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.exception("Failed to initialize database.")
         raise
 
-    # Start the ingest scheduler (APScheduler-based)
+    # Start the ingest scheduler (APScheduler-based) — only if enabled
     try:
-        app.state.scheduler = ingest_scheduler.start_scheduler(app)
-        log.info("Ingest scheduler started.")
+        if settings.INGEST_SCHED_ENABLED:
+            app.state.scheduler = ingest_scheduler.start_scheduler(app)
+            log.info("Ingest scheduler started (enabled).")
+        else:
+            log.info("Ingest scheduler disabled by config (INGEST_SCHED_ENABLED=false).")
     except Exception:
         log.exception("Failed to start ingest scheduler.")
         # do not raise—service can still serve search; but log loudly

@@ -1,0 +1,114 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    container_name: matrixhub-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-matrix}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-matrix}
+      POSTGRES_DB: ${POSTGRES_DB:-matrixhub}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    ports:
+      - "5432:5432"
+
+  # Build once; reuse image for api/worker/gateway
+  hub-base:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: matrixhub:latest
+    env_file:
+      - .env
+    environment:
+      # Point Hub at Postgres in this compose network
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
+    depends_on:
+      db:
+        condition: service_healthy
+    # Do not run; used as a base (compose extension pattern)
+    deploy:
+      replicas: 0
+
+  api:
+    image: matrixhub:latest
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
+      INGEST_SCHED_ENABLED: "false"
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-7300}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: [
+      "/app/.venv/bin/gunicorn",
+      "-k", "uvicorn.workers.UvicornWorker",
+      "-w", "${WEB_CONCURRENCY:-4}",
+      "-b", "0.0.0.0:7300",
+      "src.app:app"
+    ]
+    ports:
+      - "7300:7300"
+    restart: unless-stopped
+
+  worker:
+    image: matrixhub:latest
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
+      # Turn ON the scheduler only here
+      INGEST_SCHED_ENABLED: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+    # Run a lightweight ASGI server to host the same app (scheduler starts via env)
+    command: [
+      "/app/.venv/bin/uvicorn",
+      "src.app:app",
+      "--host", "0.0.0.0",
+      "--port", "7301",
+      "--workers", "1"
+    ]
+    expose:
+      - "7301"
+    restart: unless-stopped
+
+  # Optional: run MCP Gateway in a separate service (uses env from .env.gateway)
+  gateway:
+    image: matrixhub:latest
+    env_file:
+      - .env.gateway
+    environment:
+      # If you want Gateway on Postgres too, set here; otherwise it defaults to its own SQLite per .env.gateway
+      # DATABASE_URL: postgresql+psycopg://matrix:matrix@db:5432/mcpgateway
+      HOST: 0.0.0.0
+      PORT: 4444
+    depends_on:
+      db:
+        condition: service_started
+    # Use the gateway venv to launch its ASGI app
+    command: [
+      "/app/mcpgateway/.venv/bin/gunicorn",
+      "-k", "uvicorn.workers.UvicornWorker",
+      "-w", "${GW_WEB_CONCURRENCY:-2}",
+      "-b", "0.0.0.0:4444",
+      "mcpgateway.app:app"
+    ]
+    ports:
+      - "4444:4444"
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+
