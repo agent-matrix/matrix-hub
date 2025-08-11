@@ -81,6 +81,14 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     API_TOKEN: Optional[str] = None
 
+    # Public-facing base URL used to build absolute links in API responses.
+    # Safe default for local/dev; override via env in production.
+    PUBLIC_BASE_URL: str = Field(
+        default="http://127.0.0.1:7300",
+        description="Public base URL for generating absolute links in API responses.",
+        validation_alias=AliasChoices("PUBLIC_BASE_URL", "public_base_url"),
+    )
+
     # ---- Database ----
     DATABASE_URL: str = Field(
         default="sqlite+pysqlite:///./data/catalog.sqlite",

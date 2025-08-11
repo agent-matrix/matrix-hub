@@ -1,33 +1,37 @@
 #!/usr/bin/env bash
-# tests/test_search.sh
-# Deeper search smoke/diagnostic script for Matrix Hub.
+# tests/test_search.sh — Matrix Hub search diagnostics
 #
 # What it checks:
-#   1) Basic reachability of /catalog/search
-#   2) Keyword, semantic, and hybrid modes
-#   3) Alternate queries (underscores/hyphens/single-token)
-#   4) ETag support (If-None-Match → 304)
-#   5) Optional health/config probes (non-blocking, with timeouts)
-#   6) Optional DB peek (if sqlite3 + DB_PATH provided)
+#   1) /health and optional /config
+#   2) /catalog/search reachability
+#   3) Keyword / Semantic / Hybrid across multiple query variants
+#   4) Tests both a PRIMARY type (e.g., mcp_server) and an OPTIONAL SECONDARY type (e.g., tool)
+#   5) include_pending switch (important for new/derived entities)
+#   6) ETag behavior
+#   7) Optional DB peek (if sqlite3 + DB_PATH provided)
 #
-# Env (optional):
+# Env (override as needed):
 #   HUB_URL=http://127.0.0.1:7300
 #   API_TOKEN=...
 #   QUERY="Hello World"
-#   TYPE=mcp_server     # agent|tool|mcp_server
+#   TYPE=mcp_server              # primary type to test
+#   TYPE2=tool                   # optional 2nd type to test (leave empty to skip)
 #   LIMIT=5
 #   WITH_RAG=false
-#   DEBUG=0             # set 1 to print headers & timings
-#   DB_PATH=./data/catalog.sqlite   # OPTIONAL (if Hub repo present locally)
-#
+#   INCLUDE_PENDING=true
+#   DEBUG=0
+#   DB_PATH=./data/catalog.sqlite
+
 set -euo pipefail
 
 HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
 API_TOKEN="${API_TOKEN:-}"
 QUERY="${QUERY:-Hello World}"
 TYPE="${TYPE:-mcp_server}"
+TYPE2="${TYPE2:-tool}"
 LIMIT="${LIMIT:-5}"
 WITH_RAG="${WITH_RAG:-false}"
+INCLUDE_PENDING="${INCLUDE_PENDING:-true}"
 DEBUG="${DEBUG:-0}"
 DB_PATH="${DB_PATH:-}"
 
@@ -42,6 +46,20 @@ have jq   || die "jq is required"
 
 auth_flags=()
 [[ -n "$API_TOKEN" ]] && auth_flags=(-H "Authorization: Bearer ${API_TOKEN}")
+
+# Show useful flags/assumptions up front
+echo "── Search test config ─────────────────────────────────────────────"
+echo " HUB_URL           : $HUB_URL"
+echo " QUERY             : $QUERY"
+echo " TYPE              : $TYPE"
+[[ -n "$TYPE2" ]] && echo " TYPE2             : $TYPE2" || true
+echo " LIMIT             : $LIMIT"
+echo " WITH_RAG          : $WITH_RAG"
+echo " INCLUDE_PENDING   : $INCLUDE_PENDING"
+echo " DEBUG             : $DEBUG"
+[[ -n "$DB_PATH" ]] && echo " DB_PATH           : $DB_PATH"
+echo "───────────────────────────────────────────────────────────────────"
+echo
 
 # --- timing output (single -w string when DEBUG=1) ----------------------------
 _curl_writeout_format='%{http_code}\n
@@ -58,12 +76,10 @@ http_get() {
   headers_tmp="$(mktemp)"; body_tmp="$(mktemp)"
   local data_args=()
   for kv in "$@"; do data_args+=(--data-urlencode "$kv"); done
-
   local writeout_opt=()
   if [[ "${DEBUG}" == "1" ]]; then
     writeout_opt=(-w "$_curl_writeout_format")
   fi
-
   # shellcheck disable=SC2086
   curl -sS -G \
     "${HUB_URL%/}${path}" \
@@ -72,48 +88,46 @@ http_get() {
     "${auth_flags[@]}" \
     -H "accept: application/json" \
     --connect-timeout 2 \
-    --max-time 6 \
+    --max-time 8 \
     --retry 0 \
     --max-redirs 2 \
     "${data_args[@]}" \
     "${writeout_opt[@]}" \
     >/dev/null || {
-      # return sentinel code 000 on error/timeout
       echo "$headers_tmp|$body_tmp|000"
       return 99
     }
-
   code="$(awk 'NR==1{print $2}' "$headers_tmp")"
   echo "$headers_tmp|$body_tmp|$code"
 }
 
 print_top() {
-  local body="$1" label="$2"
-  local n total
-  n="$(jq -r '.items | length' "$body" 2>/dev/null || echo 0)"
-  total="$(jq -r '.total // (.items|length)' "$body" 2>/dev/null || echo "$n")"
-  echo "  items: $n  total: $total  (${label})"
-  if (( n > 0 )); then
-    jq -r '
-      .items[:5][] |
-      {
-        id, type, name, version,
-        score_final,
-        score_lexical,
-        score_semantic,
-        score_quality,
-        score_recency,
-        fit_reason
-      } |
-      "   • \(.id) (name=\(.name // \"\"), v=\(.version // \"\"), final=\(.score_final // \"n/a\"), lex=\(.score_lexical // \"n/a\"), sem=\(.score_semantic // \"n/a\"))" +
-      (if .fit_reason then "\n     ↳ reason: " + (.fit_reason | tostring) else "" end)
-    ' "$body"
-  else
-    echo "  (no items returned)"
-    if [[ "${DEBUG}" == "1" ]]; then
-      echo "  [DEBUG] raw response:"; sed -n '1,200p' "$body"
+    local body="$1" label="$2"
+    local n total
+    n="$(jq -r '.items | length' "$body" 2>/dev/null || echo 0)"
+    total="$(jq -r '.total // (.items|length)' "$body" 2>/dev/null || echo "$n")"
+    echo "  items: $n  total: $total  (${label})"
+    if (( n > 0 )); then
+        jq -r '
+          .items[:5][] |
+          {
+            id, type, name, version,
+            score_final,
+            score_lexical,
+            score_semantic,
+            score_quality,
+            score_recency,
+            fit_reason
+          } |
+          "   • \(.id) (name=\(.name // "\"\""), v=\(.version // "\"\""), final=\(.score_final // "n/a"), lex=\(.score_lexical // "n/a"), sem=\(.score_semantic // "n/a"))" +
+          (if .fit_reason then "\n     ↳ reason: " + (.fit_reason | tostring) else "" end)
+        ' "$body"
+    else
+        echo "  (no items returned)"
+        if [[ "${DEBUG}" == "1" ]]; then
+            echo "  [DEBUG] raw response:"; sed -n '1,200p' "$body"
+        fi
     fi
-  fi
 }
 
 probe_endpoint() {
@@ -143,7 +157,7 @@ print_headers_if_debug() {
   fi
 }
 
-# --- 0) Health/config probes (best-effort, non-blocking) ----------------------
+# --- 0) Health/config probes --------------------------------------------------
 info "Probing optional /health and /config (if exposed)…"
 probe_endpoint "/health" "GET /health"
 probe_endpoint "/config" "GET /config"
@@ -164,8 +178,11 @@ rm -f "$h0" "$b0"
 echo
 
 # Helpers for alternate queries
+
 to_underscore() { echo "$1" | tr ' ' '_' | tr '-' '_' ; }
+
 to_hyphen()     { echo "$1" | tr ' ' '-' | tr '_' '-' ; }
+
 first_token()   { echo "$1" | awk '{print $1}'; }
 
 Q1="$QUERY"
@@ -173,47 +190,60 @@ Q2="$(to_underscore "$QUERY")"
 Q3="$(to_hyphen     "$QUERY")"
 Q4="$(first_token   "$QUERY")"
 
-# --- 2) Keyword mode ----------------------------------------------------------
-for q in "$Q1" "$Q2" "$Q3" "$Q4"; do
-  info "Keyword-only: q='${q}', type='${TYPE}', limit=${LIMIT}"
-  out="$(http_get "/catalog/search" "q=${q}" "type=${TYPE}" "mode=keyword" "limit=${LIMIT}" "with_rag=false")" || die "keyword request failed"
+run_mode_suite() {
+  local typ="$1"; shift
+  local label_suffix="$1"; shift
+
+  # --- Keyword mode ----------------------------------------------------------
+  for q in "$Q1" "$Q2" "$Q3" "$Q4"; do
+    info "Keyword-only: q='${q}', type='${typ}', include_pending=${INCLUDE_PENDING}, limit=${LIMIT} ${label_suffix}"
+    out="$(http_get "/catalog/search" "q=${q}" "type=${typ}" "mode=keyword" "limit=${LIMIT}" "with_rag=false" "include_pending=${INCLUDE_PENDING}")" || die "keyword request failed"
+    IFS='|' read -r h b c <<<"$out"
+    print_headers_if_debug "$h"
+    if [[ "$c" != "200" ]]; then
+      warn "Status: $c"; sed -n '1,30p' "$h"; die "keyword search failed"
+    fi
+    print_top "$b" "mode=keyword"
+    ETAG1="$(grep -i '^ETag:' "$h" | awk '{print $2}' | tr -d '\r' || true)"
+    [[ -n "${ETAG1:-}" ]] && echo "  etag: $ETAG1"
+    echo
+    rm -f "$h" "$b"
+  done
+
+  # --- Semantic mode ---------------------------------------------------------
+  for q in "$Q1" "$Q2" "$Q3" "$Q4"; do
+    info "Semantic-only: q='${q}', type='${typ}', include_pending=${INCLUDE_PENDING}, limit=${LIMIT} ${label_suffix}"
+    out="$(http_get "/catalog/search" "q=${q}" "type=${typ}" "mode=semantic" "limit=${LIMIT}" "with_rag=false" "include_pending=${INCLUDE_PENDING}")" || die "semantic request failed"
+    IFS='|' read -r h b c <<<"$out"
+    print_headers_if_debug "$h"
+    if [[ "$c" != "200" ]]; then
+      warn "Status: $c"; sed -n '1,30p' "$h"; die "semantic search failed"
+    fi
+    print_top "$b" "mode=semantic"
+    echo
+    rm -f "$h" "$b"
+  done
+
+  # --- Hybrid + optional RAG -------------------------------------------------
+  info "Hybrid (with_rag=${WITH_RAG}): q='${Q1}', type='${typ}', include_pending=${INCLUDE_PENDING}, limit=${LIMIT} ${label_suffix}"
+  out="$(http_get "/catalog/search" "q=${Q1}" "type=${typ}" "mode=hybrid" "limit=${LIMIT}" "with_rag=${WITH_RAG}" "include_pending=${INCLUDE_PENDING}")" || die "hybrid request failed"
   IFS='|' read -r h b c <<<"$out"
   print_headers_if_debug "$h"
   if [[ "$c" != "200" ]]; then
-    warn "Status: $c"; sed -n '1,30p' "$h"; die "keyword search failed"
+    warn "Status: $c"; sed -n '1,30p' "$h"; die "hybrid search failed"
   fi
-  print_top "$b" "mode=keyword"
-  ETAG1="$(grep -i '^ETag:' "$h" | awk '{print $2}' | tr -d '\r' || true)"
-  [[ -n "${ETAG1:-}" ]] && echo "  etag: $ETAG1"
+  print_top "$b" "mode=hybrid, rag=${WITH_RAG}"
   echo
   rm -f "$h" "$b"
-done
+}
 
-# --- 3) Semantic mode (if configured, else degrades) --------------------------
-for q in "$Q1" "$Q2" "$Q3" "$Q4"; do
-  info "Semantic-only: q='${q}', type='${TYPE}', limit=${LIMIT}"
-  out="$(http_get "/catalog/search" "q=${q}" "type=${TYPE}" "mode=semantic" "limit=${LIMIT}" "with_rag=false")" || die "semantic request failed"
-  IFS='|' read -r h b c <<<"$out"
-  print_headers_if_debug "$h"
-  if [[ "$c" != "200" ]]; then
-    warn "Status: $c"; sed -n '1,30p' "$h"; die "semantic search failed"
-  fi
-  print_top "$b" "mode=semantic"
-  echo
-  rm -f "$h" "$b"
-done
+# Run for primary TYPE
+run_mode_suite "$TYPE" "(PRIMARY)"
 
-# --- 4) Hybrid + optional RAG -------------------------------------------------
-info "Hybrid (with_rag=${WITH_RAG}): q='${Q1}', type='${TYPE}', limit=${LIMIT}"
-out="$(http_get "/catalog/search" "q=${Q1}" "type=${TYPE}" "mode=hybrid" "limit=${LIMIT}" "with_rag=${WITH_RAG}")" || die "hybrid request failed"
-IFS='|' read -r h b c <<<"$out"
-print_headers_if_debug "$h"
-if [[ "$c" != "200" ]]; then
-  warn "Status: $c"; sed -n '1,30p' "$h"; die "hybrid search failed"
+# Optionally run for TYPE2 (e.g., tool) — useful after DERIVE_TOOLS_FROM_MCP=true installs
+if [[ -n "$TYPE2" ]]; then
+  run_mode_suite "$TYPE2" "(SECONDARY)"
 fi
-print_top "$b" "mode=hybrid, rag=${WITH_RAG}"
-echo
-rm -f "$h" "$b"
 
 # --- 5) ETag test -------------------------------------------------------------
 if [[ -n "${ETAG1:-}" ]]; then
@@ -231,8 +261,9 @@ if [[ -n "${ETAG1:-}" ]]; then
     --data-urlencode "mode=keyword" \
     --data-urlencode "limit=${LIMIT}" \
     --data-urlencode "with_rag=false" \
+    --data-urlencode "include_pending=${INCLUDE_PENDING}" \
     --connect-timeout 2 \
-    --max-time 6 \
+    --max-time 8 \
     --retry 0 \
     --max-redirs 2 \
     >/dev/null || {
@@ -250,28 +281,41 @@ else
   warn "No ETag observed; skipping If-None-Match test."
 fi
 
-# --- 6) Optional: DB peek for quick sanity (if path + sqlite3) ---------------
+# --- 6) Optional: DB peek -----------------------------------------------------
 if [[ -n "${DB_PATH}" && -f "${DB_PATH}" ]] && have sqlite3; then
   info "DB peek (entity counts by type) — ${DB_PATH}"
   sqlite3 -cmd ".mode tabs" -header "${DB_PATH}" \
     "SELECT type, COUNT(*) as count FROM entity GROUP BY type ORDER BY count DESC;" \
-     | column -t -s $'\t' || warn "sqlite query failed"
+      | column -t -s $'\t' || warn "sqlite query failed"
   echo
   info "Last 5 ingested mcp_server names:"
   sqlite3 -cmd ".mode tabs" -header "${DB_PATH}" \
     "SELECT name, uid, datetime(created_at) as created_at
-     FROM entity WHERE type='mcp_server'
-     ORDER BY created_at DESC
-     LIMIT 5;" | column -t -s $'\t' || true
+      FROM entity WHERE type='mcp_server'
+      ORDER BY created_at DESC
+      LIMIT 5;" | column -t -s $'\t' || true
+
+  if [[ "$TYPE2" == "tool" ]]; then
+    echo
+    info "Last 5 derived tools:"
+    sqlite3 -cmd ".mode tabs" -header "${DB_PATH}" \
+      "SELECT name, uid, datetime(created_at) as created_at
+        FROM entity WHERE type='tool'
+        ORDER BY created_at DESC
+        LIMIT 5;" | column -t -s $'\t' || true
+  fi
 fi
 
 # --- Summary ------------------------------------------------------------------
+
 echo
 ok "Search diagnostics complete."
-echo "  HUB_URL:   ${HUB_URL}"
-echo "  QUERY:     ${QUERY}"
-echo "  TYPE:      ${TYPE}"
-echo "  LIMIT:     ${LIMIT}"
-echo "  WITH_RAG:  ${WITH_RAG}"
-echo "  DEBUG:     ${DEBUG}"
-[[ -n "${DB_PATH}" ]] && echo "  DB_PATH:   ${DB_PATH}"
+echo "  HUB_URL:           ${HUB_URL}"
+echo "  QUERY:             ${QUERY}"
+echo "  TYPE:              ${TYPE}"
+[[ -n "$TYPE2" ]] && echo "  TYPE2:             ${TYPE2}" || true
+echo "  LIMIT:             ${LIMIT}"
+echo "  WITH_RAG:          ${WITH_RAG}"
+echo "  INCLUDE_PENDING:   ${INCLUDE_PENDING}"
+echo "  DEBUG:             ${DEBUG}"
+[[ -n "${DB_PATH}" ]] && echo "  DB_PATH:           ${DB_PATH}"

@@ -17,6 +17,7 @@ import logging
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi.responses import RedirectResponse  # NEW: for manifest redirect
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -101,18 +102,26 @@ def _maybe_add_fit_reasons(query: str, hits: List[Dict[str, Any]]) -> None:
 )
 def search_catalog(
     q: str = Query(..., description="User intent, e.g. 'summarize pdfs for contracts'"),
-    type: Optional[str] = Query(None, description="agent|tool|mcp_server"),
+    type: Optional[str] = Query(None, description="agent|tool|mcp_server|any"),  # UPDATED: allow 'any'
     capabilities: Optional[str] = Query(None, description="CSV list of capability filters"),
     frameworks: Optional[str] = Query(None, description="CSV list of framework filters"),
     providers: Optional[str] = Query(None, description="CSV list of provider filters"),
     mode: schemas.SearchMode = Query(settings.SEARCH_DEFAULT_MODE.value, description="keyword|semantic|hybrid"),
-    limit: int = Query(20, ge=1, le=100),
+    limit: int = Query(5, ge=1, le=100),  # UPDATED: default Top-5
     with_rag: bool = Query(False, description="Return short 'fit_reason' from top chunks"),
+    with_snippets: bool = Query(False, description="Include a short summary snippet"),  # NEW
     rerank_mode: schemas.RerankMode = Query(settings.RERANK_DEFAULT.value, alias="rerank", description="none|llm"),
     include_pending: bool = Query(False, description="Include entities that are not yet registered with Gateway (dev/debug)"),
     db: Session = Depends(get_db),
 ) -> schemas.SearchResponse:
     filters = _parse_filters(type, capabilities, frameworks, providers)
+
+    # Treat 'any' as no type filter (public meta search behavior)
+    if (filters.get("type") or "").lower() == "any":
+        filters["type"] = ""
+
+    # Enforce a Top-5 cap for the public API while still fetching a larger pool for ranking
+    limit = min(limit, 5)
 
     # Common filters forwarded to backends
     base_filters = {
@@ -168,7 +177,7 @@ def search_catalog(
     if with_rag:
         _maybe_add_fit_reasons(q, top_hits)
 
-    items = [schemas.SearchItem(**util.serialize_hit(h, db=db)) for h in top_hits]
+    items = [schemas.SearchItem(**util.serialize_hit(h, db=db, with_snippets=with_snippets)) for h in top_hits]  # UPDATED
     total = util.estimate_total(lex_hits, vec_hits)
     return schemas.SearchResponse(items=items, total=total)
 
@@ -301,3 +310,12 @@ def install_entity_route(
         files_written=result.get("files_written", []),
         lockfile=result.get("lockfile"),
     )
+
+
+# ----------- Optional manifest resolver (public helper) -----------
+@router.get("/manifest/{entity_id}", include_in_schema=False)
+def manifest_redirect(entity_id: str, db: Session = Depends(get_db)):
+    e = db.get(Entity, entity_id)
+    if not e or not e.source_url:
+        raise HTTPException(status_code=404, detail="Manifest source URL not found")
+    return RedirectResponse(url=e.source_url)

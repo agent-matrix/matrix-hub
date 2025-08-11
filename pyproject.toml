@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11,<3.13"
 license = { text = "Apache-2.0" }
 authors = [
-  { name = "agent-matrix", email = "dev@agent-matrix.example" }
+  { name = "Ruslan Magana Vsevolodovna", email = "contact@ruslanmv.com" }
 ]
 
 # Pin conservatively to stable minor ranges (July 2025).
@@ -34,6 +34,8 @@ dependencies = [
 dev = [
   "pytest>=8.2,<9.0",
   "pytest-asyncio>=0.23,<0.25",
+  "anyio>=4.0,<5.0",           
+  "trio>=0.25,<0.26",
   "ruff>=0.4,<0.6",
 ]
 

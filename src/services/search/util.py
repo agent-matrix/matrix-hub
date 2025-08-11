@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from sqlalchemy.orm import Session
 
 from ...models import Entity
+from ...config import settings  # NEW: for PUBLIC_BASE_URL when composing links
 
 
 # -------- Filters --------
@@ -118,15 +119,31 @@ def _ensure_list(v: Any) -> list[str]:
     return []
 
 
-def serialize_hit(h: Dict[str, Any], db: Session) -> Dict[str, Any]:
+def _join_url(base: str, path: str) -> str:
+    """Join base and path without duplicating slashes (tiny helper)."""
+    if not base:
+        return path
+    if base.endswith("/"):
+        base = base[:-1]
+    if not path.startswith("/"):
+        path = "/" + path
+    return base + path
+
+
+def serialize_hit(h: Dict[str, Any], db: Session, *, with_snippets: bool = False) -> Dict[str, Any]:
     """
     Hydrate a merged/ranked hit with entity metadata for API response.
     Expects keys: 'entity_id', 'score_*'.
+
+    Added (non-breaking): when the Entity is present, include
+    - manifest_url: direct entity.source_url or a local resolver path
+    - install_url: public install hint URL
+    - snippet: optional short text when with_snippets=True
     """
     eid = h["entity_id"]
     e: Optional[Entity] = db.get(Entity, eid)
     if not e:
-        # Fallback: minimal payload
+        # Fallback: minimal payload (unchanged behavior)
         return {
             "id": eid,
             "type": "",
@@ -143,7 +160,7 @@ def serialize_hit(h: Dict[str, Any], db: Session) -> Dict[str, Any]:
             "score_final": float(h.get("score_final", 0.0)),
         }
 
-    return {
+    dto: Dict[str, Any] = {
         "id": e.uid,
         "type": e.type,
         "name": e.name,
@@ -158,6 +175,22 @@ def serialize_hit(h: Dict[str, Any], db: Session) -> Dict[str, Any]:
         "score_recency": float(h.get("score_recency", 0.0)),
         "score_final": float(h.get("score_final", 0.0)),
     }
+
+    # --- New: add manifest/install URLs and optional snippet ---
+    if getattr(e, "source_url", None):
+        dto["manifest_url"] = e.source_url
+    else:
+        # Fallback to local resolver path; works if the manifest route is enabled.
+        dto["manifest_url"] = _join_url(settings.PUBLIC_BASE_URL, f"/catalog/manifest/{e.uid}")
+
+    dto["install_url"] = _join_url(settings.PUBLIC_BASE_URL, f"/catalog/install?id={e.uid}")
+
+    if with_snippets:
+        text = (e.summary or e.description or "")[:200]
+        if text:
+            dto["snippet"] = text
+
+    return dto
 
 
 # -------- Totals --------

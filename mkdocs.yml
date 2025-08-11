@@ -60,6 +60,8 @@ nav:
   - Configuration: configuration.md
   - API:
       - Endpoints: api.md
+      - Search API: api/search-api.md   # ← add this line
+
   - Catalog:
       - Ingestion: ingestion.md
       - Local Ingestion: ingestion_local.md

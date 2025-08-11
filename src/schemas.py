@@ -90,6 +90,11 @@ class SearchItem(BaseModel):
     # Populated when with_rag=true (optional short explanation)
     fit_reason: Optional[str] = None
 
+    # --- New optional fields for Top-5 meta search (non-breaking) ---
+    manifest_url: Optional[str] = None
+    install_url: Optional[str] = None
+    snippet: Optional[str] = None
+
 
 class SearchResponse(BaseModel):
     items: List[SearchItem] = Field(default_factory=list)

@@ -143,7 +143,8 @@ $(VENV_DIR)/installed: pyproject.toml
 	@echo "=> Stale or missing venv detected. Installing dependencies..."
 	@test -d $(VENV_DIR) || $(PY) -m venv $(VENV_DIR)
 	@. $(VENV_DIR)/bin/activate && pip install --upgrade pip setuptools wheel
-	@. $(VENV_DIR)/bin/activate && pip install ."[dev]"
+#	@. $(VENV_DIR)/bin/activate && pip install ."[dev]"
+	@. $(VENV_DIR)/bin/activate && pip install --upgrade ."[dev]"
 	@echo "Setup complete."
 	@touch $@  # This creates the empty '.venv/installed' file
 
