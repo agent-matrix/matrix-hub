@@ -8,6 +8,14 @@ from sqlalchemy import or_, func
 from src.models import Entity
 
 
+def _escape_like(s: str) -> str:
+    """
+    Escape SQL LIKE wildcards so they are treated literally.
+    Order matters: escape backslash first, then % and _.
+    """
+    return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def search_like(
     db: Session,
     q: str,
@@ -23,7 +31,7 @@ def search_like(
     - Returns a list of Entity rows ordered by recency.
     """
     q = (q or "").strip().lower()
-    qs = f"%{q}%"
+    qs = f"%{_escape_like(q)}%" if q else None
 
     base = db.query(Entity)
 
@@ -36,18 +44,18 @@ def search_like(
             Entity.gateway_error.is_(None),
         )
 
-    if q:
+    if qs is not None:
         base = base.filter(
             or_(
-                func.lower(Entity.name).like(qs),
-                func.lower(Entity.summary).like(qs),
-                func.lower(Entity.description).like(qs),
+                func.lower(Entity.name).like(qs, escape="\\"),
+                func.lower(Entity.summary).like(qs, escape="\\"),
+                func.lower(Entity.description).like(qs, escape="\\"),
             )
         )
 
     return (
         base.order_by(Entity.created_at.desc())
-            .limit(int(limit))
-            .offset(int(offset))
-            .all()
+        .limit(int(limit))
+        .offset(int(offset))
+        .all()
     )

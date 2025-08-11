@@ -8,11 +8,12 @@ Pydantic DTOs and enums used by Matrix Hub API.
 
 from __future__ import annotations
 
+import json # <-- 1. IMPORT
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator # <-- 2. IMPORT field_validator
 
 
 # ---------------- Enums (kept local to avoid circular imports) ----------------
@@ -37,6 +38,30 @@ JSONDict = Dict[str, Any]
 JSONValue = Union[str, int, float, bool, None, Dict[str, Any], List[Any]]
 
 
+# ---------------- Helper for Reusable Validation ----------------
+
+def _coerce_str_to_list(value: Any) -> List[str]:
+    """Helper to robustly coerce a value into a list of strings."""
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    if isinstance(value, str):
+        # Handle empty string
+        if not value.strip():
+            return []
+        # Try to parse as JSON list first
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            # If not valid JSON, fall back to comma-separated values
+            return [item.strip() for item in value.split(',') if item.strip()]
+    # As a final fallback for other types, return an empty list
+    return []
+
+
 # ---------------- Search results ----------------
 
 class SearchItem(BaseModel):
@@ -49,6 +74,12 @@ class SearchItem(BaseModel):
     capabilities: Capabilities = Field(default_factory=list)
     frameworks: Frameworks = Field(default_factory=list)
     providers: Providers = Field(default_factory=list)
+
+    # --- 3. VALIDATOR ADDED ---
+    @field_validator("capabilities", "frameworks", "providers", mode="before")
+    @classmethod
+    def _validate_lists(cls, v: Any) -> List[str]:
+        return _coerce_str_to_list(v)
 
     score_lexical: float = 0.0
     score_semantic: float = 0.0
@@ -80,6 +111,12 @@ class EntityDetail(BaseModel):
     frameworks: Frameworks = Field(default_factory=list)
     providers: Providers = Field(default_factory=list)
 
+    # --- 4. SAME VALIDATOR REUSED ---
+    @field_validator("capabilities", "frameworks", "providers", mode="before")
+    @classmethod
+    def _validate_lists(cls, v: Any) -> List[str]:
+        return _coerce_str_to_list(v)
+
     license: Optional[str] = None
     homepage: Optional[str] = None
     source_url: Optional[str] = None
@@ -106,7 +143,7 @@ class InstallRequest(BaseModel):
     2) Direct/inline install (quick testing): Provide `manifest` inline. In this mode,
        no DB entity is required and the manifest is used directly.
     """
-    id: str                            # e.g. "mcp_server:hello-sse-server@0.1.0"
+    id: str                      # e.g. "mcp_server:hello-sse-server@0.1.0"
     target: str
     version: Optional[str] = None
 

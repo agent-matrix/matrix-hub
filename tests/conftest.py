@@ -7,6 +7,8 @@ Goals
 - Disable background scheduler by default.
 - Provide small conveniences (quiet logging, optional TestClient fixture).
 - Clean up temporary SQLite files created by tests.
+- Ensure search runs in "dev" mode (no external vector/lexical backends).
+- Enable tool derivation during tests (so /catalog/install creates tool rows).
 
 Notes
 -----
@@ -27,14 +29,13 @@ import pytest
 # ---------------------------------------------------------------------
 # Environment defaults (must be set BEFORE importing application code)
 # ---------------------------------------------------------------------
-# Use a local SQLite file by default for the entire test session.
-# Using the standard synchronous driver.
+# Local SQLite DB for tests. Keep the simple driver so it works everywhere.
 os.environ.setdefault("DATABASE_URL", "sqlite:///./ci.sqlite")
 
-# ❗️ FIXED: Use the modern CATALOG_REMOTES variable name.
 # Disable remote ingestion & background scheduler for tests.
 os.environ.setdefault("CATALOG_REMOTES", "[]")
 os.environ.setdefault("INGEST_INTERVAL_MIN", "0")
+os.environ.setdefault("INGEST_SCHED_ENABLED", "false")
 
 # Keep logs quiet in CI unless a test explicitly raises the level.
 os.environ.setdefault("LOG_LEVEL", "WARNING")
@@ -45,6 +46,18 @@ os.environ.setdefault("API_TOKEN", "")
 # Provide harmless gateway defaults; tests stub actual network calls.
 os.environ.setdefault("MCP_GATEWAY_URL", "http://localhost:7200")
 os.environ.setdefault("MCP_GATEWAY_TOKEN", "")
+
+# --- Search / RAG defaults for tests (pure local) --------------------
+# Force lexical fallback and disable vector backends.
+os.environ.setdefault("SEARCH_LEXICAL_BACKEND", "none")
+os.environ.setdefault("SEARCH_VECTOR_BACKEND", "none")
+# Make hybrid default predictable (still works with "none" backends).
+os.environ.setdefault("SEARCH_DEFAULT_MODE", "hybrid")
+# Disable RAG & reranking by default in tests.
+os.environ.setdefault("RAG_ENABLED_DEFAULT", "false")
+os.environ.setdefault("RERANK_DEFAULT", "none")
+# Enable tool derivation so /catalog/install produces tool rows in tests.
+os.environ.setdefault("DERIVE_TOOLS_FROM_MCP", "true")
 
 # ---------------------------------------------------------------------
 # Logging hygiene for noisy libraries
@@ -82,15 +95,22 @@ def _cleanup_sqlite_files() -> Generator[None, None, None]:
     """
     Remove common SQLite files produced by tests to keep the workspace clean.
     """
+    # Pre-clean to avoid state leakage between runs
+    for p in ("./ci.sqlite", "./test_ci.sqlite", "./test_search.sqlite", "./test_install.sqlite"):
+        try:
+            Path(p).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     yield
 
+    # Post-clean (best-effort)
     candidates: List[Path] = [
         Path("./ci.sqlite"),
         Path("./test_ci.sqlite"),
         Path("./test_search.sqlite"),
         Path("./test_install.sqlite"),
     ]
-
     for p in candidates:
         try:
             if p.exists():
@@ -114,10 +134,27 @@ def _ensure_scheduler_stopped() -> Generator[None, None, None]:
         from src.app import app  # lazy import to avoid side effects early
         from src.workers.scheduler import stop_scheduler
 
-        # ❗️ FIXED: Pass the scheduler instance from app.state, not the app itself.
+        # Pass the scheduler instance from app.state, not the app itself.
         scheduler = getattr(app.state, "scheduler", None)
         if scheduler:
             stop_scheduler(scheduler)
     except Exception:
         # If imports fail or scheduler wasn't started, ignore.
         pass
+
+
+# --- DB Session fixture -------------------------------------------------------
+@pytest.fixture
+def session():
+    """
+    Provide a real SQLAlchemy Session bound to the test database.
+    Uses src.db init to ensure schema is present.
+    """
+    from src.db import init_db, SessionLocal
+
+    init_db()            # builds engine(s) and ensures schema
+    db = SessionLocal()  # write-capable session
+    try:
+        yield db
+    finally:
+        db.close()

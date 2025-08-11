@@ -10,6 +10,7 @@ Search utilities:
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 
@@ -89,6 +90,34 @@ def compute_recency_score(ts: Optional[datetime], now: Optional[datetime] = None
 
 # -------- Serialization --------
 
+def _ensure_list(v: Any) -> list[str]:
+    """
+    Coerce common malformed inputs to a list of strings.
+    Handles None, existing lists, JSON strings, and CSV strings.
+    """
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return [str(x) for x in v]
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        # Try to parse as a JSON list first
+        try:
+            parsed = json.loads(s)
+            if isinstance(parsed, list):
+                return [str(x) for x in parsed]
+        except json.JSONDecodeError:
+            # If not JSON, fall back to splitting by comma
+            pass
+        return [x.strip() for x in s.split(",") if x.strip()]
+    # Fallback for other iterable types like tuples or sets
+    if isinstance(v, (tuple, set)):
+        return [str(x) for x in v]
+    return []
+
+
 def serialize_hit(h: Dict[str, Any], db: Session) -> Dict[str, Any]:
     """
     Hydrate a merged/ranked hit with entity metadata for API response.
@@ -120,9 +149,9 @@ def serialize_hit(h: Dict[str, Any], db: Session) -> Dict[str, Any]:
         "name": e.name,
         "version": e.version,
         "summary": e.summary or "",
-        "capabilities": e.capabilities or [],
-        "frameworks": e.frameworks or [],
-        "providers": e.providers or [],
+        "capabilities": _ensure_list(e.capabilities),
+        "frameworks": _ensure_list(e.frameworks),
+        "providers": _ensure_list(e.providers),
         "score_lexical": float(h.get("score_lexical", 0.0)),
         "score_semantic": float(h.get("score_semantic", 0.0)),
         "score_quality": float(h.get("score_quality", 0.0)),

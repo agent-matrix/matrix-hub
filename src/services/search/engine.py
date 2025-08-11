@@ -67,7 +67,12 @@ def run_pgtrgm(
 
     # k is the top-k target (backend expands internally)
     k = max(int(limit), 1)
-    hits: List[Hit] = pgtrgm_backend.search(q=q, filters=filters, k=k, db=db)
+
+    try:
+        hits: List[Hit] = pgtrgm_backend.search(q=q, filters=filters, k=k, db=db)
+    except Exception:
+        # Defensive: never let backend errors bubble up to the route
+        hits = []
 
     if not include_pending:
         hits = _filter_ready_hits(db, hits)
@@ -107,8 +112,7 @@ def run_keyword(
         offset=0,
     )
 
-    # If caller requested READY-only but fallback didn't enforce, it already did above.
-    # Compute a crude lexical score based on matches across fields, then normalize.
+    # Compute a crude lexical score based on matches across fields.
     q_l = (q or "").strip().lower()
     sims_raw: List[float] = []
     meta: List[Dict] = []
@@ -133,7 +137,15 @@ def run_keyword(
             }
         )
 
-    sims = normalize_minmax(sims_raw) if sims_raw else []
+    # Zero-range guard to avoid NaN/inf from normalization
+    if sims_raw:
+        lo, hi = min(sims_raw), max(sims_raw)
+        if hi <= lo:
+            sims = [0.0] * len(sims_raw)
+        else:
+            sims = normalize_minmax(sims_raw)
+    else:
+        sims = []
 
     all_hits: List[Hit] = []
     for i, m in enumerate(meta):
