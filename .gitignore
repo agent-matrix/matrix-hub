@@ -52,3 +52,6 @@ matrix.lock.json
 /data/blobs
 matrix.lock.json
 matrix.lock.json
+/.matrix
+matrix.lock.json
+matrix.lock.json
