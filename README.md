@@ -7,31 +7,26 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/ruslanmv/matrix-hub.svg)](https://hub.docker.com/r/ruslanmv/matrix-hub)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![CI Status](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/agent-matrix/matrix-hub/actions/workflows/ci.yml)
-[![Docs](https://img.shields.io/static/v1?label=docs&message=mkdocs&color=blue&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
-[![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-<a href="https://github.com/ruslanmv/agent-generator"><img src="https://img.shields.io/badge/Powered%20by-agent--generator-brightgreen" alt="Powered by agent-generator"></a>
+[![Docs](https://img.shields.io/static/v1?label=docs\&message=mkdocs\&color=blue\&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
+[![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) <a href="https://github.com/ruslanmv/agent-generator"><img src="https://img.shields.io/badge/Powered%20by-agent--generator-brightgreen" alt="Powered by agent-generator"></a>
 
 Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 
-**Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.  
+**Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
 
-- **API**: FastAPI on port **7300**  
-- **DB**: PostgreSQL (SQLite supported for lightweight/dev use)  
-- **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed  
-- **Install**: Idempotent steps, project adapters, lockfile generation  
-- **Auth**: Optional bearer‑token for admin endpoints  
-- **Logs**: Structured JSON with correlation IDs  
-
-
-
+* **API**: FastAPI on port **7300**
+* **DB**: PostgreSQL (SQLite supported for lightweight/dev use)
+* **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed
+* **Install**: Idempotent steps, project adapters, lockfile generation
+* **Auth**: Optional bearer‑token for admin endpoints
+* **Logs**: Structured JSON with correlation IDs
 
 ## What is Matrix Hub?
 
-  Imagine PyPI for intelligent agents and custom tools—Matrix Hub ingests curated manifests from GitHub (or any remote catalog), lets you find the perfect agent in seconds using hybrid text + semantic search, and then safely installs everything into your project (pip, Docker, Git, or ZIP) with a single command. It even auto‑registers new services with your MCP Gateway, writes scaffolding adapters, and produces a lockfile so your builds are rock‑solid.  
+Imagine PyPI for intelligent agents and custom tools—Matrix Hub ingests curated manifests from GitHub (or any remote catalog), lets you find the perfect agent in seconds using hybrid text + semantic search, and then safely installs everything into your project (pip, Docker, Git, or ZIP) with a single command. It even auto‑registers new services with your MCP Gateway, writes scaffolding adapters, and produces a lockfile so your builds are rock‑solid.
 
-
-```mermaid 
+```mermaid
 flowchart TD
     A[Agent Authors<br>manifests] --> B[GitHub Catalog]
     B --> C[Matrix Hub<br>catalog & install]
@@ -42,14 +37,87 @@ flowchart TD
     G --> H[Your App<br>invokes agents]
 ```
 
-Ready to discover, install, and manage enterprise‑grade AI skills? 
-Explore the [full documentation](https://agent-matrix.github.io/matrix-hub/) to get started!  
+Ready to discover, install, and manage enterprise‑grade AI skills?
+Explore the [full documentation](https://agent-matrix.github.io/matrix-hub/) to get started!
 
+---
 
+## Official Search API 
 
+Matrix Hub exposes a stable, public endpoint that returns the **Top‑5** best matches for a query across agents, tools, and MCP servers. This contract is additive and safe for production.
 
+### Endpoint
 
+```
+GET /catalog/search
+```
 
+**Common parameters**
+
+* `q` *(string, required)* – user intent, e.g. `summarize pdfs`
+* `type` *(enum: agent|tool|mcp\_server|any, default any)* – filter by type; `any` searches all.
+* `limit` *(int, default 5)* – maximum items returned. Public API caps to **5**.
+* `with_snippets` *(bool, default false)* – include a short snippet (first \~200 chars of summary/description) when available.
+
+Advanced parameters (optional): `mode` (`keyword|semantic|hybrid`), `with_rag` (bool), `rerank` (`none|llm`), and CSV filters `capabilities`, `frameworks`, `providers`.
+
+### Response
+
+Each item includes ranking scores and convenience links for import/install:
+
+```json
+{
+  "items": [
+    {
+      "id": "tool:hello@0.1.0",
+      "type": "tool",
+      "name": "hello",
+      "version": "0.1.0",
+      "summary": "Return greeting",
+      "capabilities": ["hello"],
+      "frameworks": ["example"],
+      "providers": ["self"],
+      "score_lexical": 0.81,
+      "score_semantic": 0.74,
+      "score_quality": 0.90,
+      "score_recency": 0.88,
+      "score_final": 0.82,
+      "fit_reason": null,
+      "manifest_url": "https://…/hello.manifest.json",
+      "install_url": "https://api.example.com/catalog/install?id=tool:hello@0.1.0",
+      "snippet": "Short summary snippet if with_snippets=true"
+    }
+  ],
+  "total": 1
+}
+```
+
+### Quick start (curl)
+
+```bash
+curl -s 'https://api.example.com/catalog/search?q=extract%20pdf%20tables&type=any&limit=5&with_snippets=true' | jq
+```
+
+To install a selected item:
+
+```bash
+curl -s -X POST 'https://api.example.com/catalog/install' \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "id": "tool:pdf_table_extractor@1.1.0",
+    "target": "./"
+  }'
+```
+
+> See the full API doc: [Top‑5 Search API](docs/api/search-api.md).
+
+**Deployment notes**
+
+* Set `PUBLIC_BASE_URL` in your environment (e.g., `https://api.example.com`).
+* The optional helper route `GET /catalog/manifest/{id}` can redirect to external manifests when `source_url` is set.
+* No database migrations required.
+
+---
 
 ## Quick start (docker compose)
 
@@ -70,14 +138,14 @@ docker compose up -d --build
 # 4) Health check
 curl -s http://localhost:7300/health | jq
 ```
+
 You should see:
 
 ```json
 { "status": "ok" }
 ```
-The app container waits for Postgres to be healthy, then starts the API. Ingest is scheduled (see INGEST_INTERVAL_MIN in .env).
 
-
+The app container waits for Postgres to be healthy, then starts the API. Ingest is scheduled (see INGEST\_INTERVAL\_MIN in .env).
 
 ## Environment
 
@@ -85,20 +153,20 @@ All configuration is via environment variables; see `.env.example` for a documen
 
 Key settings (common):
 
-| Variable                    | Purpose                                         | Example                                                                 |
-| :-------------------------- | :---------------------------------------------- | :---------------------------------------------------------------------- |
-| `DATABASE_URL`              | SQLAlchemy URL                                  | `postgresql+psycopg://matrix:matrix@db:5432/matrixhub`                  |
-| `HOST` / `PORT`             | Bind address/port                               | `0.0.0.0` / `7300`                                                      |
-| `MATRIX_REMOTES`            | CSV/JSON list of `index.json` URLs to ingest    | `https://raw.githubusercontent.com/agent-matrix/catalog/main/index.json`|
-| `INGEST_INTERVAL_MIN`       | Background ingest interval (minutes)            | `15`                                                                    |
-| `API_TOKEN`                 | Bearer token for admin/protected endpoints      | `set_me`                                                                |
-| `MCP_GATEWAY_URL`           | MCP Gateway base URL                            | `http://mcpgateway:7200`                                                |
-| `MCP_GATEWAY_TOKEN`         | Bearer for Gateway admin API                    | `supersecret`                                                           |
-| `SEARCH_LEXICAL_BACKEND`    | `pgtrgm` or `none`                              | `pgtrgm`                                                                |
-| `SEARCH_VECTOR_BACKEND`     | `pgvector` / `none`                             | `none`                                                                  |
-| `SEARCH_HYBRID_WEIGHTS`     | `sem:0.6,lex:0.4,rec:0.1,q:0.1`                 |                                                                         |
-| `RAG_ENABLED`               | `false`                                         |                                                                         |
-| `EMBED_MODEL`               | Embedder identifier (informational)             | `sentence-transformers/all-MiniLM-L6-v2`                                |
+| Variable                 | Purpose                                      | Example                                                                  |
+| :----------------------- | :------------------------------------------- | :----------------------------------------------------------------------- |
+| `DATABASE_URL`           | SQLAlchemy URL                               | `postgresql+psycopg://matrix:matrix@db:5432/matrixhub`                   |
+| `HOST` / `PORT`          | Bind address/port                            | `0.0.0.0` / `7300`                                                       |
+| `MATRIX_REMOTES`         | CSV/JSON list of `index.json` URLs to ingest | `https://raw.githubusercontent.com/agent-matrix/catalog/main/index.json` |
+| `INGEST_INTERVAL_MIN`    | Background ingest interval (minutes)         | `15`                                                                     |
+| `API_TOKEN`              | Bearer token for admin/protected endpoints   | `set_me`                                                                 |
+| `MCP_GATEWAY_URL`        | MCP Gateway base URL                         | `http://mcpgateway:7200`                                                 |
+| `MCP_GATEWAY_TOKEN`      | Bearer for Gateway admin API                 | `supersecret`                                                            |
+| `SEARCH_LEXICAL_BACKEND` | `pgtrgm` or `none`                           | `pgtrgm`                                                                 |
+| `SEARCH_VECTOR_BACKEND`  | `pgvector` / `none`                          | `none`                                                                   |
+| `SEARCH_HYBRID_WEIGHTS`  | `sem:0.6,lex:0.4,rec:0.1,q:0.1`              |                                                                          |
+| `RAG_ENABLED`            | `false`                                      |                                                                          |
+| `EMBED_MODEL`            | Embedder identifier (informational)          | `sentence-transformers/all-MiniLM-L6-v2`                                 |
 
 **Security:** If you set `API_TOKEN`, pass `Authorization: Bearer <token>` on protected endpoints (e.g., manual ingest). Without it, admin endpoints are disabled or open depending on route configuration.
 
@@ -113,6 +181,7 @@ Liveness/readiness. Optional DB probe:
 ```bash
 curl -s 'http://localhost:7300/health?check_db=true' | jq
 ```
+
 Returns:
 
 ```json
@@ -132,7 +201,7 @@ Hybrid search over the catalog with optional filters.
 * `providers` — CSV, e.g. `openai,watsonx`
 * `mode` — `keyword` | `semantic` | `hybrid` (default from settings)
 * `limit` — default `20`
-* `with_rag` — `true` to enrich results with a short “fit_reason”
+* `with_rag` — `true` to enrich results with a short “fit\_reason”
 * `rerank` — `none` | `llm` (default from settings)
 
 **Example**
@@ -140,6 +209,7 @@ Hybrid search over the catalog with optional filters.
 ```bash
 curl -s 'http://localhost:7300/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize&limit=5&with_rag=true' | jq
 ```
+
 **Response (truncated)**
 
 ```json
@@ -196,6 +266,7 @@ curl -s -X POST 'http://localhost:7300/catalog/install' \
   -H 'Content-Type: application/json' \
   -d '{"id":"agent:pdf-summarizer@1.4.2","target":"./apps/pdf-bot"}' | jq
 ```
+
 **Response (truncated)**
 
 ```json
@@ -219,7 +290,6 @@ curl -s -X POST 'http://localhost:7300/catalog/install' \
   "lockfile": { "version":1, "entities":[{ "id":"agent:pdf-summarizer@1.4.2", "...": "..." }] }
 }
 ```
-Note: MCP server registration maps to the Gateway’s `/gateways` endpoint automatically via the internal client.
 
 ## Manifests & Schemas
 
@@ -237,16 +307,19 @@ Minimal `index.json` formats accepted:
 ```json
 { "manifests": ["https://.../agents/pdf/1.4.2/agent.manifest.yaml"] }
 ```
+
 or
 
 ```json
 { "items": [ {"manifest_url": "https://.../tool.manifest.yaml"} ] }
 ```
+
 or
 
 ```json
-{ "entries": [ {"base_url": "[https://raw.githubusercontent.com/ORG/REPO/main/](https://raw.githubusercontent.com/ORG/REPO/main/)", "path": "agents/pdf/1.4.2/agent.manifest.yaml"} ] }
+{ "entries": [ {"base_url": "https://raw.githubusercontent.com/ORG/REPO/main/", "path": "agents/pdf/1.4.2/agent.manifest.yaml"} ] }
 ```
+
 Example agent manifest (excerpt):
 
 ```yaml
@@ -271,7 +344,7 @@ mcp_registration:
     name: pdf_summarize
     integration_type: REST
     request_type: POST
-    url: [https://example.com/invoke](https://example.com/invoke)
+    url: https://example.com/invoke
     input_schema: { type: object, properties: { input: { type: string } }, required: [input] }
 ```
 
@@ -290,6 +363,7 @@ make dev
 # or
 uvicorn src.app:app --reload --port 7300
 ```
+
 **Quality & tests**
 
 ```bash
@@ -297,6 +371,7 @@ make fmt        # ruff fix + format
 make lint       # ruff check
 make test       # pytest -q
 ```
+
 **Where things live**
 
 ```
@@ -322,6 +397,7 @@ make migrate m="add quality indexes"
 # Apply to head
 make upgrade
 ```
+
 In production, run migrations as part of your deploy step (e.g., init container or CI job) before starting new app instances.
 
 ## Production notes
@@ -332,31 +408,37 @@ In production, run migrations as part of your deploy step (e.g., init container 
 docker build -t ghcr.io/agent-matrix/matrix-hub:latest .
 docker run -p 7300:7300 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
 ```
+
 **Database:** Use PostgreSQL in production. SQLite is supported for quick local trials only.
 **Scaling:** The API is stateless; scale horizontally behind a reverse proxy/load balancer. Ensure a single writer for migrations.
 **Observability:** Logs are JSON‑formatted with correlation IDs (see `src/utils/logging.py`). Forward stdout/stderr to your log stack (e.g., Loki/ELK). Add metrics/tracing as needed.
 **Security:**
+
 * Set `API_TOKEN` to protect admin routes.
 * Place the service behind TLS (e.g., NGINX/Envoy) and enforce client auth if needed.
 * Configure outbound access policies for `pip`, `docker`, and `git` if your environment restricts egress.
-**MCP Gateway:** Expose `MCP_GATEWAY_URL` and `MCP_GATEWAY_TOKEN`. The installer will register tools/servers after artifacts are installed.
+  **MCP Gateway:** Expose `MCP_GATEWAY_URL` and `MCP_GATEWAY_TOKEN`. The installer will register tools/servers after artifacts are installed.
 
 ## Troubleshooting
 
 **API returns 500 on `/catalog/search`**
+
 * Check DB connectivity (`/health?check_db=true`).
 * Ensure the entity table is populated (ingest logs).
 * If running SQLite, semantic/vector search is disabled by default.
 
 **No results after ingest**
+
 * Verify `MATRIX_REMOTES` points to a valid `index.json`.
 * Review container logs for validation errors (schema mismatches).
 
 **Install fails on `pip`/`docker`/`git`**
+
 * See the `results` array in the install response for command stdout/stderr.
 * Check that the container has network access and the artifact references are valid.
 
 **Gateway registration errors**
+
 * Confirm `MCP_GATEWAY_URL` is reachable and token is correct.
 * Some gateways perform discovery automatically; our client handles transport normalization.
 
@@ -367,7 +449,8 @@ Apache‑2.0. See [LICENSE](LICENSE).
 ## See also
 
 **Schemas:**
+
 * Agent — `schemas/agent.manifest.schema.json`
 * Tool — `schemas/tool.manifest.schema.json`
 * MCP Server — `schemas/mcp-server.manifest.schema.json`
-**Tests:** `tests/` — smoke tests and examples; run with `make test`.
+  **Tests:** `tests/` — smoke tests and examples; run with `make test`.
