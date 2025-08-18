@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import List, Optional, Dict
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from src.config import settings
 from src.models import Entity
@@ -40,6 +41,62 @@ def _filter_ready_hits(db: Session, hits: List[Hit]) -> List[Hit]:
         and (getattr(r, "gateway_error", None) is None)
     }
     return [h for h in hits if h.entity_id in ready_ids]
+
+
+def _ready_filter_query(qb, include_pending: bool):
+    """Apply READY-only filter to an ORM query when include_pending=False."""
+    if not include_pending:
+        qb = qb.filter(
+            Entity.gateway_registered_at.isnot(None),
+            Entity.gateway_error.is_(None),
+        )
+    return qb
+
+
+def _fallback_uid_or_slug_hit(
+    db: Session,
+    q: str,
+    types: Optional[List[str]],
+    include_pending: bool,
+) -> List[Hit]:
+    """
+    Fallback for exact UID or slug-in-UID queries when the primary lexical
+    backend returns no hits.
+
+    - If q looks like a full UID (contains ':' and '@'), try exact case-insensitive uid match.
+    - Else, try to find q as the slug segment inside uid via '%:slug@%'.
+    Returns at most one Hit with score=1.0.
+    """
+    qn = (q or "").strip()
+    if not qn:
+        return []
+
+    ql = qn.lower()
+    qb = db.query(Entity)
+
+    if ":" in ql and "@" in ql:
+        qb = qb.filter(func.lower(Entity.uid) == ql)
+    else:
+        qb = qb.filter(func.lower(Entity.uid).like(f"%:{ql}@%"))
+
+    if types:
+        qb = qb.filter(Entity.type.in_(types))
+
+    qb = _ready_filter_query(qb, include_pending)
+    ent = qb.order_by(Entity.created_at.desc()).first()
+    if not ent:
+        return []
+
+    ts = ent.release_ts or ent.created_at
+    return [
+        Hit(
+            entity_id=ent.uid,
+            score=1.0,                 # lead when user typed an exact/slug id
+            source="lexical",          # <-- IMPORTANT: ensure ranker doesn't drop it
+            quality=float(ent.quality_score or 0.0),
+            recency=compute_recency_score(ts),
+        )
+    ]
 
 
 def run_pgtrgm(
@@ -80,7 +137,13 @@ def run_pgtrgm(
     # Offset handling (cheap slice); pg_trgm backend doesn't support offset natively
     if offset:
         hits = hits[offset:]
-    return hits[:limit]
+    hits = hits[:limit]
+
+    # If nothing matched via normal lexical fields, try a single UID/slug fallback.
+    if not hits:
+        return _fallback_uid_or_slug_hit(db, q, types, include_pending)
+
+    return hits
 
 
 def run_keyword(
@@ -163,4 +226,10 @@ def run_keyword(
     # Honor offset/limit
     if offset:
         all_hits = all_hits[offset:]
-    return all_hits[:limit]
+    sliced = all_hits[:limit]
+
+    # If LIKE returned nothing, try the same UID/slug fallback used in pg_trgm path.
+    if not sliced:
+        return _fallback_uid_or_slug_hit(db, q, types, include_pending)
+
+    return sliced

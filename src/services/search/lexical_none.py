@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from typing import List, Optional
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 from sqlalchemy import or_, func
 
 from src.models import Entity
@@ -29,11 +29,26 @@ def search_like(
     - Matches case-insensitively across name, summary, description.
     - Optionally restricts to READY-only (default) unless include_pending=True.
     - Returns a list of Entity rows ordered by recency.
+    - Optimized to load only necessary columns.
     """
     q = (q or "").strip().lower()
     qs = f"%{_escape_like(q)}%" if q else None
 
-    base = db.query(Entity)
+    base = (
+        db.query(Entity)
+        .options(
+            load_only(
+                Entity.uid,
+                Entity.type,
+                Entity.name,
+                Entity.summary,
+                Entity.description,
+                Entity.created_at,
+                Entity.release_ts,
+                Entity.quality_score,
+            )
+        )
+    )
 
     if types:
         base = base.filter(Entity.type.in_(types))

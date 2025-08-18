@@ -13,18 +13,20 @@ Returns Pydantic DTOs defined in src/schemas.py.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Optional, List, Dict, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import RedirectResponse  # NEW: for manifest redirect
+from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
 from ..models import Entity
 from .. import schemas
-from ..utils.tools import install_inline_manifest  # NEW: inline install shortcut (skip DB)
+from ..utils.tools import install_inline_manifest  # inline install shortcut (skip DB)
 
 # Search plumbing (interfaces + backends)
 from ..services.search import ranker, util  # type: ignore
@@ -93,6 +95,10 @@ def _maybe_add_fit_reasons(query: str, hits: List[Dict[str, Any]]) -> None:
             return
 
 
+def _make_etag(key: str) -> str:
+    return f'W/"{hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]}"'
+
+
 # ----------- Routes -----------
 
 @router.get(
@@ -101,15 +107,16 @@ def _maybe_add_fit_reasons(query: str, hits: List[Dict[str, Any]]) -> None:
     summary="Hybrid search over the catalog (lexical + vector + quality/recency)",
 )
 def search_catalog(
+    request: Request,
     q: str = Query(..., description="User intent, e.g. 'summarize pdfs for contracts'"),
-    type: Optional[str] = Query(None, description="agent|tool|mcp_server|any"),  # UPDATED: allow 'any'
+    type: Optional[str] = Query(None, description="agent|tool|mcp_server|any"),
     capabilities: Optional[str] = Query(None, description="CSV list of capability filters"),
     frameworks: Optional[str] = Query(None, description="CSV list of framework filters"),
     providers: Optional[str] = Query(None, description="CSV list of provider filters"),
     mode: schemas.SearchMode = Query(settings.SEARCH_DEFAULT_MODE.value, description="keyword|semantic|hybrid"),
-    limit: int = Query(5, ge=1, le=100),  # UPDATED: default Top-5
+    limit: int = Query(5, ge=1, le=100),  # default Top-5 (public)
     with_rag: bool = Query(False, description="Return short 'fit_reason' from top chunks"),
-    with_snippets: bool = Query(False, description="Include a short summary snippet"),  # NEW
+    with_snippets: bool = Query(False, description="Include a short summary snippet"),
     rerank_mode: schemas.RerankMode = Query(settings.RERANK_DEFAULT.value, alias="rerank", description="none|llm"),
     include_pending: bool = Query(False, description="Include entities that are not yet registered with Gateway (dev/debug)"),
     db: Session = Depends(get_db),
@@ -122,6 +129,7 @@ def search_catalog(
 
     # Enforce a Top-5 cap for the public API while still fetching a larger pool for ranking
     limit = min(limit, 5)
+    POOL_K = 50
 
     # Common filters forwarded to backends
     base_filters = {
@@ -129,7 +137,7 @@ def search_catalog(
         "capabilities": filters["capabilities"],
         "frameworks": filters["frameworks"],
         "providers": filters["providers"],
-        "limit": max(limit, 50),
+        "limit": max(limit, POOL_K),
     }
 
     # Lexical (BM25/pg_trgm) unless semantic-only
@@ -142,7 +150,7 @@ def search_catalog(
                 q=q,
                 types=([filters["type"]] if filters["type"] else None),
                 include_pending=include_pending,
-                limit=max(limit, 50),
+                limit=max(limit, POOL_K),
                 offset=0,
             )
         else:
@@ -150,17 +158,18 @@ def search_catalog(
             lex_kwargs = dict(base_filters)
             # Forward the dev switch for backends that support it (prod-safe default False)
             lex_kwargs["include_pending"] = include_pending
-            # Avoid passing db to Null backends
-            if "Null" not in lexical.__class__.__name__:
+            # Avoid passing db to Null backends (defensive getattr)
+            if "Null" not in getattr(getattr(lexical, "__class__", object), "__name__", ""):
                 lex_kwargs["db"] = db
             lex_hits = lexical.search(q, **lex_kwargs)
 
-    # Vector (ANN) unless keyword-only — keep signature strict (no include_pending kw for Null backends)
+    # Vector (ANN) unless keyword-only — restore v0.1.4 behavior
     vec_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.keyword:
         q_vec = embedder.encode([q])[0]
         vec_kwargs = dict(base_filters)
-        if "Null" in vector.__class__.__name__:
+        name = getattr(getattr(vector, "__class__", object), "__name__", "")
+        if "Null" in name:
             # Defensive: ensure unsupported keys are not present for Null backends
             vec_kwargs.pop("include_pending", None)
         else:
@@ -171,15 +180,41 @@ def search_catalog(
     merged = ranker.merge_and_score(lex_hits, vec_hits)
 
     # Optional rerank (top-50 → top-N)
-    top_hits = _maybe_rerank(q, merged[: max(limit, 50)], rerank_mode)[:limit]
+    top_hits = _maybe_rerank(q, merged[: max(limit, POOL_K)], rerank_mode)[:limit]
 
     # Optional RAG reasons (short, cached)
     if with_rag:
         _maybe_add_fit_reasons(q, top_hits)
 
-    items = [schemas.SearchItem(**util.serialize_hit(h, db=db, with_snippets=with_snippets)) for h in top_hits]  # UPDATED
+    items = [schemas.SearchItem(**util.serialize_hit(h, db=db, with_snippets=with_snippets)) for h in top_hits]
     total = util.estimate_total(lex_hits, vec_hits)
-    return schemas.SearchResponse(items=items, total=total)
+
+    # ETag + short cache (safe for public search)
+    etag_key = json.dumps(
+        {
+            "q": q,
+            "type": (filters["type"] or "any"),
+            "mode": mode.value,
+            "limit": limit,
+            "weights": settings.SEARCH_HYBRID_WEIGHTS,
+            "ids": [h.get("entity_id") for h in top_hits],
+        },
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    etag = _make_etag(etag_key)
+
+    if request.headers.get("if-none-match") == etag:
+        return JSONResponse(status_code=304, content=None, headers={
+            "ETag": etag,
+            "Cache-Control": "public, max-age=60",
+        })
+
+    payload = schemas.SearchResponse(items=items, total=total).model_dump()
+    return JSONResponse(payload, headers={
+        "ETag": etag,
+        "Cache-Control": "public, max-age=60",
+    })
 
 
 @router.get(
@@ -215,6 +250,7 @@ def get_entity(
         updated_at=entity.updated_at,
     )
 
+
 @router.post(
     "/install",
     response_model=schemas.InstallResponse,
@@ -228,35 +264,6 @@ def install_entity_route(
     """
     Execute an install plan for a catalog entity, optionally registering it
     with MCP-Gateway, and write a lockfile for reproducibility.
-
-    What this endpoint does
-    -----------------------
-    - Reads an install plan from a manifest (either inline or from the DB).
-    - Executes artifact steps such as:
-        - PyPI install using uv/pip (system install).
-        - Docker/OCI image pull.
-        - Git clone (optional branch/ref).
-        - ZIP fetch and extract.
-    - Writes adapters (if defined in the manifest) into the target project.
-    - Executes MCP-Gateway registration if `mcp_registration` is present.
-    - Produces and writes `matrix.lock.json` describing the installed entity.
-
-    Two modes
-    ---------
-    1) Inline install (quick testing):
-        If `req.manifest` is provided, the endpoint installs directly from that
-        manifest — no database entity or prior ingest is required.
-
-    2) DB-backed install (catalog flow):
-        If `req.manifest` is not provided, the endpoint expects the entity to
-        exist in the Hub database (after a successful /ingest). It resolves by
-        `req.id` (UID like `type:name@1.2.3`) and fetches the manifest from
-        `entity.source_url`.
-
-    Error handling
-    --------------
-    - Known installation failures are returned as 422 (InstallError).
-    - Unexpected errors are returned as 500 with minimal detail.
     """
     try:
         rid = getattr(getattr(request, "state", object()), "request_id", None)
