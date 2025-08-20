@@ -51,7 +51,7 @@ jobs:
           echo "BUILD_DATE=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> $GITHUB_ENV
           echo "Resolved RELEASE_TAG=${RELEASE_TAG}, SEMVER=${SEMVER}, SHORT_SHA=${SHORT_SHA}"
 
-      # docker.io requires lowercase namespace in the image path
+      # docker.io requires lowercase namespace
       - name: Compute image name (lowercase)
         id: img
         shell: bash
@@ -101,11 +101,14 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ env.BUILD_DATE }}
 
+      # Build & push using the SAME Dockerfile you use locally.
+      # Important: do not inject runtime env; keep image neutral.
       - name: Build & push (Docker Hub)
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ./Dockerfile
           push: true
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
@@ -116,6 +119,26 @@ jobs:
             BUILD_VERSION=${{ env.SEMVER }}
             BUILD_COMMIT=${{ github.sha }}
             BUILD_DATE=${{ env.BUILD_DATE }}
+            # Optional: pin gateway repo ref/tag/branch used by the Dockerfile
+            GATEWAY_REF=${{ vars.GATEWAY_REF || 'main' }}
+            # Optional: pass through a private index if you use one
+            PIP_INDEX_URL=${{ secrets.PIP_INDEX_URL }}
+
+      # Guard 1: The image must NOT contain a baked /app/mcpgateway/.env
+      - name: Sanity guard — no baked gateway .env
+        shell: bash
+        run: |
+          REF="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          docker run --rm --entrypoint /bin/bash "$REF" -lc 'test ! -f /app/mcpgateway/.env'
+          echo "OK: no baked /app/mcpgateway/.env"
+
+      # Guard 2: The image must NOT contain a SQLite db (e.g. mcp.db)
+      - name: Sanity guard — no baked SQLite DB
+        shell: bash
+        run: |
+          REF="$(echo "${{ steps.meta.outputs.tags }}" | head -n1)"
+          docker run --rm --entrypoint /bin/bash "$REF" -lc 'if find /app -maxdepth 6 -name "mcp.db" -o -name "*.sqlite" | grep -q .; then echo "Found SQLite DB in image"; exit 1; fi'
+          echo "OK: no baked SQLite DB"
 
       - name: Inspect multi-arch manifest (release tag)
         if: always()
