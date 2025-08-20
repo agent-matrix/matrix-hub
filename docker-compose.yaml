@@ -5,38 +5,101 @@ services:
     image: postgres:16
     container_name: matrixhub-db
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-matrix}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-matrix}
-      POSTGRES_DB: ${POSTGRES_DB:-matrixhub}
+      # Superuser creds for bootstrap
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      test: ["CMD-SHELL", "pg_isready -q -h 127.0.0.1 -p 5432 -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
     ports:
       - "5432:5432"
+    restart: unless-stopped
+
+  # One-shot initializer to create role "matrix" and DBs "matrixhub" and "mcpgateway"
+  db-init:
+    image: postgres:16
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      PGUSER: ${POSTGRES_USER:-postgres}
+      PGHOST: db
+      PGDATABASE: ${POSTGRES_DB:-postgres}
+    entrypoint: ["/bin/bash","-lc"]
+    command: >
+      psql -v ON_ERROR_STOP=1 -c "DO $$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'matrix') THEN
+          CREATE ROLE matrix LOGIN PASSWORD 'matrix';
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'matrixhub') THEN
+          CREATE DATABASE matrixhub OWNER matrix;
+        END IF;
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname = 'mcpgateway') THEN
+          CREATE DATABASE mcpgateway OWNER matrix;
+        END IF;
+      END $$;"
+    restart: "no"
 
   app:
+    # Build the image you produced with scripts/build_container_prod.sh (or switch to image:)
     build:
       context: .
       dockerfile: Dockerfile
     container_name: matrixhub-app
-    env_file:
-      - .env
-    environment:
-      # Sensible default for local compose; can be overridden from .env
-      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
-      HOST: ${HOST:-0.0.0.0}
-      PORT: ${PORT:-7300}
     depends_on:
       db:
         condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    # We run the working gateway starter + Hub (gunicorn) — no supervisord here
+    entrypoint: ["/bin/bash","-lc"]
+    command: >
+      bash /app/scripts/start-mcp-gateway.sh &
+      exec /app/.venv/bin/gunicorn src.app:app
+      -k uvicorn.workers.UvicornWorker
+      --bind 0.0.0.0:7300
+    environment:
+      # The gateway start script uses HOST/PORT for the Gateway process
+      HOST: ${GATEWAY_HOST:-0.0.0.0}
+      PORT: ${GATEWAY_PORT:-4444}
+      # Helpful defaults for Hub if your /app/.env doesn’t override them
+      INGEST_SCHED_ENABLED: ${INGEST_SCHED_ENABLED:-false}
     ports:
-      - "7300:7300"
+      - "7300:7300"   # Matrix Hub API
+      - "4444:4444"   # MCP Gateway
     restart: unless-stopped
+
+    # Mount the exact files where your script expects them.
+    # - Hub:   /app/.env  (fallback to .env.example via variable below)
+    # - GW:    prefer .env.gateway.local, else .env.gateway.example
+    # - Start script: scripts/start-mcp-gateway.sh
+    volumes:
+      # Hub env (prefer .env, else .env.example by overriding HUB_ENV_FILE)
+      - type: bind
+        source: ${HUB_ENV_FILE:-.env}
+        target: /app/.env
+        read_only: true
+
+      # Gateway env: choose which file on the host to mount as ".env.gateway.local" in the container.
+      # If you have a local file, set:  GATEWAY_ENV_FILE=.env.gateway.local
+      # Otherwise it will default to .env.gateway.example.
+      - type: bind
+        source: ${GATEWAY_ENV_FILE:-.env.gateway.example}
+        target: /app/.env.gateway.local
+        read_only: true
+
+      # Working launcher that safely handles Alembic stamping/SQLite duplicates
+      - type: bind
+        source: ./scripts/start-mcp-gateway.sh
+        target: /app/scripts/start-mcp-gateway.sh
+        read_only: true
 
 volumes:
   pgdata:
