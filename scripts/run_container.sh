@@ -7,7 +7,7 @@
 #
 # Env file selection policy:
 #   Gateway: use .env.gateway.local, else .env.gateway.example (required)
-#   Hub:     use .env,             else .env.example          (required)
+#   Hub:     use .env,               else .env.example       (required)
 #
 # Optional: START_DB=1 to launch a Postgres sidecar and create users/DBs.
 #
@@ -25,7 +25,7 @@ GIT_SHA="$(git -C "${PROJECT_ROOT}" rev-parse --short HEAD 2>/dev/null || echo l
 IMAGE_TAG="${IMAGE_TAG:-$(date +%Y%m%d)-${GIT_SHA}}"
 FULL_IMAGE_NAME="${IMAGE_NAME}:${IMAGE_TAG}"
 
-CONTAINER_NAME="${CONTAINER_NAME:-matrix-hub-production}"
+CONTAINER_NAME="${CONTAINER_NAME:-matrixhub}"
 
 # ---------------------------
 # Ports
@@ -93,8 +93,8 @@ detect_db_super_creds() {
     envdump="$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "${DB_CONTAINER_NAME}" 2>/dev/null || true)"
     while IFS= read -r line; do
       case "$line" in
-        POSTGRES_USER=*)    DB_SUPER_USER="${line#*=}";;
-        POSTGRES_PASSWORD=*)DB_SUPER_PASS="${line#*=}";;
+        POSTGRES_USER=*)     DB_SUPER_USER="${line#*=}";;
+        POSTGRES_PASSWORD=*) DB_SUPER_PASS="${line#*=}";;
       esac
     done <<< "${envdump}"
   fi
@@ -192,11 +192,15 @@ pick_gateway_env_sources() {
 
 stop_rm_if_exists() {
   local name="$1"
-  if docker ps -q -f name="^${name}$" >/dev/null; then
+  # FIX: Check for command output, not just exit code.
+  # This checks if the container is currently running.
+  if [ -n "$(docker ps -q -f name="^${name}$")" ]; then
     step "Stopping ${name}"
     docker stop "${name}" >/dev/null
   fi
-  if docker ps -aq -f name="^${name}$" >/dev/null; then
+  # FIX: Check for command output, not just exit code.
+  # This checks if the container exists at all (running or stopped).
+  if [ -n "$(docker ps -aq -f name="^${name}$")" ]; then
     step "Removing ${name}"
     docker rm "${name}" >/dev/null
   fi
@@ -222,11 +226,11 @@ if ! docker image inspect "${FULL_IMAGE_NAME}" >/dev/null 2>&1; then
 fi
 
 # Run container:
-#  - Mount Hub env to /app/.env (read-only)
-#  - Mount Gateway env source to /app/.env.gateway.local OR /app/.env.gateway.example
-#  - Mount the working start script
-#  - Start gateway via script (it copies env into /app/mcpgateway/.env and handles Alembic logic)
-#  - Start Hub via gunicorn in the foreground (keeps container alive)
+# - Mount Hub env to /app/.env (read-only)
+# - Mount Gateway env source to /app/.env.gateway.local OR /app/.env.gateway.example
+# - Mount the working start script
+# - Start gateway via script (it copies env into /app/mcpgateway/.env and handles Alembic logic)
+# - Start Hub via gunicorn in the foreground (keeps container alive)
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --network "${NETWORK_NAME}" \
