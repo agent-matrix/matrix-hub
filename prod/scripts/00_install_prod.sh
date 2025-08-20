@@ -2,17 +2,17 @@
 set -euo pipefail
 
 # This helper bootstraps a production Ubuntu 20.04 host in two steps:
-#  1) Install Docker + Compose plugin (run as root via sudo)
-#  2) Deploy the Matrix Hub with Docker Compose (run as your normal user)
+#  1) Install Docker + Compose plugin (run as root via sudo)
+#  2) Deploy the Matrix Hub with Docker Compose (run as your normal user)
 #
 # It downloads 01/02 from the repo's raw URLs so you can run this script from anywhere.
 
-BASE_RAW_URL="https://raw.githubusercontent.com/agent-matrix/matrix-hub/main/prod/scripts"
+BASE_RAW_URL="https://raw.githubusercontent.com/agent-matrix/matrix-hub/refs/heads/master/prod/scripts"
 
 # Ensure curl is present
 if ! command -v curl >/dev/null 2>&1; then
-  echo "curl not found. Installing..."
-  sudo apt-get update -y && sudo apt-get install -y curl
+  echo "curl not found. Installing..."
+  sudo apt-get update -y && sudo apt-get install -y curl
 fi
 
 echo "==> Downloading setup scripts"
@@ -35,11 +35,11 @@ echo
 
 # If docker is usable without sudo right now, we can continue automatically.
 if docker info >/dev/null 2>&1; then
-  echo "✅ Docker is usable by the current shell. Proceeding with deployment..."
-  # Default to cloning from the public repo into /opt/matrix-hub
-  REPO_URL="https://github.com/agent-matrix/matrix-hub" ./02_deploy_matrix_hub.sh
+  echo "✅ Docker is usable by the current shell. Proceeding with deployment..."
+  # Default to cloning from the public repo into /opt/matrix-hub
+  REPO_URL="https://github.com/agent-matrix/matrix-hub" ./02_deploy_matrix_hub.sh
 else
-  cat <<'INSTRUCTIONS'
+  cat <<'INSTRUCTIONS'
 
 Next steps (run as your normal user AFTER re-login):
 

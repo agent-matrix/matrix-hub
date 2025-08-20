@@ -5,7 +5,7 @@ set -euo pipefail
 APP_NAME="${APP_NAME:-matrix-hub}"
 APP_DIR="${APP_DIR:-/opt/matrix-hub}"
 REPO_URL="${REPO_URL:-https://github.com/agent-matrix/matrix-hub}"  # default to official repo
-SOURCE_DIR="${SOURCE_DIR:-}"        # if you want to deploy from a local directory instead
+SOURCE_DIR="${SOURCE_DIR:-}"      # if you want to deploy from a local directory instead
 EXPOSE_API_PORT="${EXPOSE_API_PORT:-7300}"
 EXPOSE_GATEWAY_PORT="${EXPOSE_GATEWAY_PORT:-4444}"
 POSTGRES_IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
@@ -24,6 +24,7 @@ abort() { echo "ERROR: $*" >&2; exit 1; }
 # ===== Checks =====
 need_cmd docker || abort "docker not found. Run 01_setup_docker_ubuntu2004.sh first and re-login."
 need_cmd openssl || abort "openssl is required."
+need_cmd git || abort "git is required to clone the repository."
 
 # Ensure docker daemon is up
 if ! systemctl is-active --quiet docker; then
@@ -39,11 +40,13 @@ sudo chown -R "${OWNER}":"${OWNER}" "${APP_DIR}"
 
 # ===== Obtain source =====
 if [[ -n "${REPO_URL}" && -z "${SOURCE_DIR}" ]]; then
-  echo "==> Cloning ${REPO_URL}"
+  echo "==> Cloning 'master' branch from ${REPO_URL}"
   if [[ ! -d "${APP_DIR}/src/.git" ]]; then
-    git clone "${REPO_URL}" "${APP_DIR}/src"
+    # Clone the specific master branch
+    git clone -b master "${REPO_URL}" "${APP_DIR}/src"
   else
-    (cd "${APP_DIR}/src" && git fetch --all && git pull --ff-only)
+    # Ensure the existing repo is on the master branch and up-to-date
+    (cd "${APP_DIR}/src" && git checkout master && git fetch --all && git pull --ff-only)
   fi
 elif [[ -n "${SOURCE_DIR}" ]]; then
   echo "==> Copying from ${SOURCE_DIR}"
@@ -128,8 +131,8 @@ cat <<MSG
 ✅ Deployment complete.
 
 Ports (host):
-- API:     http://<your-host>:${EXPOSE_API_PORT}
-- Gateway: http://<your-host>:${EXPOSE_GATEWAY_PORT}
+- API:      http://<your-host>:${EXPOSE_API_PORT}
+- Gateway:  http://<your-host>:${EXPOSE_GATEWAY_PORT}
 
 Paths:
 - Repo dir: ${APP_DIR}/src
