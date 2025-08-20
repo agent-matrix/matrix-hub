@@ -4,6 +4,9 @@
 
 # Local env & caches
 .env
+.env.*            # ignore all local env variants (we mount at run-time instead)
+!.env.example     # but keep templates
+!.env.gateway.example
 __pycache__/
 .pytest_cache/
 .venv/
@@ -12,8 +15,15 @@ dist/
 build/
 pgdata/
 data/
+logs/
+mcpgateway/logs/
+
+# SQLite / local DBs anywhere
 *.sqlite
 *.db
+*/**/*.sqlite
+*/**/*.db
+mcpgateway/mcp.db
 
 # Tests are not needed in runtime image
 tests/
