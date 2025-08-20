@@ -1,0 +1,6 @@
+<!--?xml version="1.0" encoding="UTF-8"?-->
+<!-- MatrixHub rounded green square -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Full-bleed rounded square; adjust rx/ry for more/less rounding -->
+  <rect x="0" y="0" width="1024" height="1024" rx="180" ry="180" fill="#00E887"></rect>
+</svg>
