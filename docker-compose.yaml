@@ -64,7 +64,7 @@ services:
       bash /app/scripts/start-mcp-gateway.sh &
       exec /app/.venv/bin/gunicorn src.app:app
       -k uvicorn.workers.UvicornWorker
-      --bind 0.0.0.0:7300
+      --bind 0.0.0.0:443
     environment:
       # The gateway start script uses HOST/PORT for the Gateway process
       HOST: ${GATEWAY_HOST:-0.0.0.0}
@@ -72,7 +72,7 @@ services:
       # Helpful defaults for Hub if your /app/.env doesn’t override them
       INGEST_SCHED_ENABLED: ${INGEST_SCHED_ENABLED:-false}
     ports:
-      - "7300:7300"   # Matrix Hub API
+      - "443:443"   # Matrix Hub API
       - "4444:4444"   # MCP Gateway
     restart: unless-stopped
 
