@@ -18,9 +18,9 @@ This document explains how the Docker image is built and run for **Matrix Hub** 
   * Helper scripts: `/app/scripts/build_container.sh`, `/app/scripts/run_container.sh`
 * **Default exposed ports:**
 
-  * **Hub:** `7300`
+  * **Hub:** `443`
   * **Gateway:** `4444`
-* **Healthcheck:** probes Hub at `http://127.0.0.1:${PORT:-7300}/`.
+* **Healthcheck:** probes Hub at `http://127.0.0.1:${PORT:-443}/`.
 
 > The entrypoint (`scripts/run_prod.sh`) launches **Gateway first**, waits for its port, then launches **Matrix Hub**. Both are supervised: if one exits, the other is stopped gracefully.
 
@@ -33,7 +33,7 @@ This document explains how the Docker image is built and run for **Matrix Hub** 
 
 **Important variables:**
 
-* **Hub bind:** `HOST=0.0.0.0`, `PORT=7300`
+* **Hub bind:** `HOST=0.0.0.0`, `PORT=443`
 * **Hub → Gateway integration:** `MCP_GATEWAY_URL=http://127.0.0.1:4444` (or external URL if you skip the embedded gateway)
 * **Gateway bind:** `HOST=0.0.0.0`, `PORT=4444`
 
@@ -76,7 +76,7 @@ docker build \
 Use the run helper (recommended):
 
 ```bash
-# Start both Hub (7300) and Gateway (4444), map ports to host
+# Start both Hub (443) and Gateway (4444), map ports to host
 scripts/run_container.sh --image matrix-hub --tag latest
 
 # Run Hub only (skip embedded Gateway) and map Hub to 7310 on host
@@ -85,7 +85,7 @@ scripts/run_container.sh --skip-gateway --app-port 7310 --env-file ./.env
 
 Key flags:
 
-* `--app-port PORT` → host port for Hub (container 7300)
+* `--app-port PORT` → host port for Hub (container 443)
 * `--gw-port PORT` → host port for Gateway (container 4444)
 * `--skip-gateway` → do not start the embedded Gateway (sets `GATEWAY_SKIP_START=1`)
 * `--env-file PATH` → pass a `.env` for Matrix Hub
@@ -101,7 +101,7 @@ Direct `docker run` example:
 
 ```bash
 docker run -d --name matrix-hub \
-  -p 7300:7300 -p 4444:4444 \
+  -p 443:443 -p 4444:4444 \
   --env-file ./.env \
   -v matrixhub_data:/app/data \
   matrix-hub:latest
@@ -112,7 +112,7 @@ docker run -d --name matrix-hub \
 ## Supervisor behavior (`scripts/run_prod.sh`)
 
 * Starts **MCP‑Gateway** first, waits for `:4444` (or gateway’s `PORT`) to listen.
-* Starts **Matrix Hub** next on `:7300` (or Hub’s `PORT`).
+* Starts **Matrix Hub** next on `:443` (or Hub’s `PORT`).
 * Uses **gunicorn + uvicorn workers** when available; falls back to uvicorn.
 * **Workers** auto‑calculated as `2*CPU+1` (override via env).
 * Graceful shutdown on exit; kills the sibling process if one dies.
@@ -159,7 +159,7 @@ docker run -d --name matrix-hub \
 
 ## Health / readiness
 
-* Dockerfile healthcheck pings Hub at `http://127.0.0.1:${PORT:-7300}/`.
+* Dockerfile healthcheck pings Hub at `http://127.0.0.1:${PORT:-443}/`.
 * `scripts/run_container.sh` waits for Hub after start and prints the URLs.
 
 ---
@@ -224,7 +224,7 @@ docker run -d --name matrix-hub \
 * **Build:** `scripts/build_container.sh`
 * **Run:** `scripts/run_container.sh`
 * **Entrypoint:** `scripts/run_prod.sh`
-* **Default ports:** Hub `7300`, Gateway `4444`
+* **Default ports:** Hub `443`, Gateway `4444`
 * **Hub env:** `.env` (copied from `.env.example` if missing)
 * **Gateway env:** `mcpgateway/.env` (from gateway setup)
 * **Volumes:** `/app/data`, optional `/app/mcpgateway/.state`
@@ -279,14 +279,14 @@ A production compose file typically defines four services: `db` (Postgres), `api
 docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-* **API** listens on `:7300` with `INGEST_SCHED_ENABLED=false`.
+* **API** listens on `:443` with `INGEST_SCHED_ENABLED=false`.
 * **Worker** runs the same app with `INGEST_SCHED_ENABLED=true` (no public port required).
 * **Gateway** listens on `:4444` (optional if you use an external gateway).
 
 Check health:
 
 ```bash
-curl -f http://localhost:7300/ | jq
+curl -f http://localhost:443/ | jq
 curl -f http://localhost:4444/ | jq  # if you run the gateway service
 ```
 

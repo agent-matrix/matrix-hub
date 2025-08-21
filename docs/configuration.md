@@ -5,7 +5,7 @@ Matrix Hub is configured entirely via environment variables (see `.env.example`)
 | Key | Description | Example |
 |---|---|---|
 | `DATABASE_URL` | SQLAlchemy URL | `postgresql+psycopg://matrix:matrix@db:5432/matrixhub` |
-| `HOST` / `PORT` | Bind address & port | `0.0.0.0` / `7300` |
+| `HOST` / `PORT` | Bind address & port | `0.0.0.0` / `443` |
 | `API_TOKEN` | Bearer token for admin/protected routes | `supersecret` |
 | `MATRIX_REMOTES` | CSV/JSON list of `index.json` URLs to ingest | `https://raw.githubusercontent.com/.../index.json` |
 | `INGEST_INTERVAL_MIN` | Background ingestion interval (minutes) | `15` |

@@ -1,6 +1,6 @@
 # API — Endpoints
 
-Base URL defaults to `http://localhost:7300`.
+Base URL defaults to `http://localhost:443`.
 
 This Hub stores a catalog of manifests (agents/tools/mcp\_servers), installs artifacts, and syncs MCP servers into **MCP-Gateway**. Mutating endpoints require an admin token if `API_TOKEN` is set.
 

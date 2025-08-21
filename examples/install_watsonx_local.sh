@@ -7,7 +7,7 @@ set -euo pipefail
 #  - Removes 'transport' to avoid Hub normalization
 #  - Preflights the SSE endpoint to prevent 502 during gateway registration
 
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 MANIFEST_PATH="${MANIFEST_PATH:-examples/manifests/watsonx.manifest.json}"
 ENTITY_UID="${ENTITY_UID:-mcp_server:watsonx-agent@0.1.0}"
 TARGET_DIR="${TARGET_DIR:-./}"

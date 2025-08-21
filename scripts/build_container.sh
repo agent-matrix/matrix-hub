@@ -61,14 +61,14 @@ Next:
   docker run -d --name hub-api \
     -e INGEST_SCHED_ENABLED=false \
     -e DATABASE_URL=postgresql+psycopg://matrix:matrix@localhost:5432/matrixhub \
-    -p 7300:7300 \
+    -p 443:443 \
     matrixhub:latest \
-    /app/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:7300 src.app:app
+    /app/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:443 src.app:app
 
   # Run Gateway+Hub via supervisor (default CMD). Be sure to mount a Postgres .env for the Gateway:
   #   /app/mcpgateway/.env must contain: DATABASE_URL=postgresql+psycopg://matrix:matrix@<db-host>:5432/mcpgateway
   docker run -d --name matrix-hub-production \
-    -p 7300:7300 -p 4444:4444 \
+    -p 443:443 -p 4444:4444 \
     -v "$PWD/.env.gateway:/app/mcpgateway/.env:ro" \
     matrixhub:latest
 

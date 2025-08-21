@@ -11,7 +11,7 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 
 # —— Configuration (override via ENV) ——
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 GATEWAY_URL="${GATEWAY_URL:-http://127.0.0.1:4444}"
 REMOTE_INDEX="${REMOTE_INDEX:-https://raw.githubusercontent.com/ruslanmv/hello-mcp/refs/heads/main/matrix/index.json}"
 

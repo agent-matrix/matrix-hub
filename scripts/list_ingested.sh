@@ -8,7 +8,7 @@
 #
 # Env (optional):
 #   DB_PATH=./data/catalog.sqlite
-#   HUB_URL=http://127.0.0.1:7300
+#   HUB_URL=http://127.0.0.1:443
 #   API_TOKEN=...        # only used for API fallback
 #
 # Requires: sqlite3, jq (API fallback uses jq)
@@ -19,7 +19,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 DB_PATH="${DB_PATH:-${ROOT_DIR}/data/catalog.sqlite}"
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 API_TOKEN="${API_TOKEN:-}"
 
 log()  { printf "\033[1;34m➤\033[0m %s\n" "$*"; }

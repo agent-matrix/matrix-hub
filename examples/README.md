@@ -12,7 +12,7 @@ This guide shows **all supported ways to bring MCP servers/agents/tools into Mat
 
 ## 1) Prerequisites
 
-* **MatrixHub** API running (default: `http://127.0.0.1:7300`).
+* **MatrixHub** API running (default: `http://127.0.0.1:443`).
 * **mcpgateway** running (default admin API used by MatrixHub).
 * CLI tools: `bash`, `curl`, `jq`, `python`.
 * Your MCP server running (SSE **`/sse`** endpoint recommended).

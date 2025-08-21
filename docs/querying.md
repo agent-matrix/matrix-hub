@@ -49,8 +49,8 @@ Matrix Hub exposes `GET /catalog/search` for discovery with optional hybrid rank
 ### Examples
 ```bash
 # Keyword-only
-curl -s 'http://localhost:7300/catalog/search?q=pdf&type=agent&mode=keyword' | jq
+curl -s 'http://localhost:443/catalog/search?q=pdf&type=agent&mode=keyword' | jq
 
 # Hybrid with filters and RAG
-curl -s 'http://localhost:7300/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize&mode=hybrid&with_rag=true' | jq
+curl -s 'http://localhost:443/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize&mode=hybrid&with_rag=true' | jq
 ```

@@ -12,7 +12,7 @@ VENV_DIR        ?= .venv
 UVICORN         ?= uvicorn
 APP             ?= src.app:app
 HOST            ?= 0.0.0.0
-PORT            ?= 7300
+PORT            ?= 443
 
 RUFF            ?= ruff
 PYTEST          ?= pytest
@@ -123,7 +123,7 @@ help:
 	@echo ""
 	@echo "Monitoring:"
 	@echo "  monitor-gateway   Periodically check MCP Gateway health on HOST:PORT (default 0.0.0.0:4444)"
-	@echo "  monitor-hub       Periodically check Matrix Hub health on HOST:PORT (default 0.0.0.0:7300)"
+	@echo "  monitor-hub       Periodically check Matrix Hub health on HOST:PORT (default 0.0.0.0:443)"
 	@echo "Logs:"
 	@echo "  logs-gateway      Tail MCP Gateway logs (defaults to mcpgateway/logs/mcpgateway.log)"
 	@echo "  logs-hub          Tail Matrix Hub logs (file or Docker; see script --help)"
@@ -313,7 +313,7 @@ BUILDX               ?= 0         # 0 | 1
 
 # -------- Run-time variables (override as needed) ----------
 CONTAINER_NAME       ?= matrix-hub
-APP_HOST_PORT        ?= 7300
+APP_HOST_PORT        ?= 443
 GW_HOST_PORT         ?= 4444
 DATA_VOLUME          ?= matrixhub_data
 GW_VOLUME            ?=           # optional (e.g., mcpgw_data)

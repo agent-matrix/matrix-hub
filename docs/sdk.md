@@ -11,7 +11,7 @@ pip install matrix-python-sdk
 ```python
 from matrix_sdk.client import MatrixClient
 
-client = MatrixClient(base_url="http://localhost:7300", token=None)
+client = MatrixClient(base_url="http://localhost:443", token=None)
 
 # Search
 resp = client.search(

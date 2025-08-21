@@ -53,9 +53,9 @@ Run API only (no scheduler):
   docker run -d --name hub-api \
     -e INGEST_SCHED_ENABLED=false \
     -e DATABASE_URL=postgresql+psycopg://matrix:matrix@localhost:5432/matrixhub \
-    -p 7300:7300 \
+    -p 443:443 \
     ${FULL_IMAGE_NAME} \
-    /app/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:7300 src.app:app
+    /app/.venv/bin/gunicorn -k uvicorn.workers.UvicornWorker -w 4 -b 0.0.0.0:443 src.app:app
 
 Run Worker (scheduler enabled):
   docker run -d --name hub-worker \

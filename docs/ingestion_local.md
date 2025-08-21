@@ -33,14 +33,14 @@ From the **Matrix-Hub repo root**:
 # One-time:
 make setup
 
-# Start the API server (port 7300)
+# Start the API server (port 443)
 make dev
 ```
 
 Verify it’s alive:
 
 ```bash
-curl -sS http://127.0.0.1:7300/health
+curl -sS http://127.0.0.1:443/health
 # expect 200 OK with a JSON body
 ```
 
@@ -64,20 +64,20 @@ It prints something like:
 ⏳ Minting admin JWT for user 'admin'...
 ✅ Token and endpoint prepared. Use 'eval' to export them.
 export ADMIN_TOKEN='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
-export HUB_ENDPOINT='0.0.0.0:7300'
+export HUB_ENDPOINT='0.0.0.0:443'
 ```
 
 Now **export** those values (copy/paste exactly):
 
 ```bash
 export ADMIN_TOKEN='ey...<snip>...'
-export HUB_ENDPOINT='0.0.0.0:7300'
+export HUB_ENDPOINT='0.0.0.0:443'
 ```
 
 Normalize `HUB_URL` for curl:
 
 ```bash
-# If HUB_ENDPOINT is "0.0.0.0:7300", convert it to "http://127.0.0.1:7300"
+# If HUB_ENDPOINT is "0.0.0.0:443", convert it to "http://127.0.0.1:443"
 if [[ "$HUB_ENDPOINT" == 0.0.0.0:* ]]; then
   export HUB_URL="http://127.0.0.1:${HUB_ENDPOINT##*:}"
 else
@@ -85,10 +85,10 @@ else
 fi
 
 echo "HUB_URL=$HUB_URL"
-# -> HUB_URL=http://127.0.0.1:7300
+# -> HUB_URL=http://127.0.0.1:443
 ```
 
-> **Why not 0.0.0.0?** That’s a **bind** address on the server. Clients should use `127.0.0.1:7300` (or your LAN IP/hostname).
+> **Why not 0.0.0.0?** That’s a **bind** address on the server. Clients should use `127.0.0.1:443` (or your LAN IP/hostname).
 
 ---
 
@@ -359,7 +359,7 @@ If it shows 200 for both and recognizes the index shape (`items`, `manifests`, o
   Sanity check:
 
   ```bash
-  echo "$HUB_URL"   # should be http://127.0.0.1:7300
+  echo "$HUB_URL"   # should be http://127.0.0.1:443
   ```
 
 * **“No compatible ingest function found in src.services.ingest”**
@@ -416,7 +416,7 @@ make gateway-token
 
 # paste the two export lines:
 export ADMIN_TOKEN='...'
-export HUB_ENDPOINT='0.0.0.0:7300'
+export HUB_ENDPOINT='0.0.0.0:443'
 
 # normalize HUB_URL:
 if [[ "$HUB_ENDPOINT" == 0.0.0.0:* ]]; then
@@ -424,7 +424,7 @@ if [[ "$HUB_ENDPOINT" == 0.0.0.0:* ]]; then
 else
   export HUB_URL="http://${HUB_ENDPOINT}"
 fi
-echo "$HUB_URL"  # http://127.0.0.1:7300
+echo "$HUB_URL"  # http://127.0.0.1:443
 ```
 
 ### Catalog (local)
@@ -488,7 +488,7 @@ JSON
   *Must show proper JSON with `"items":[{"manifest_url":"..."}]`.*
 
 * **Is my Hub URL set?**
-  `echo "$HUB_URL"` → *must be `http://127.0.0.1:7300`.*
+  `echo "$HUB_URL"` → *must be `http://127.0.0.1:443`.*
 
 * **Do I have logs?**
   The terminal running `make dev` shows detailed errors if something fails (DB, Gateway registration, schema mismatch, etc.).

@@ -16,7 +16,7 @@ Edit `.env` as needed (e.g., `MATRIX_REMOTES` to your catalog’s `index.json`).
 ## 2) Run with compose
 ```bash
 docker compose up -d --build
-curl -s http://localhost:7300/health | jq
+curl -s http://localhost:443/health | jq
 ```
 Expected:
 
@@ -26,13 +26,13 @@ Expected:
 
 ## 3) Search the catalog
 ```bash
-curl -s 'http://localhost:7300/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize' | jq
+curl -s 'http://localhost:443/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize' | jq
 ```
 
 ## 4) Install into your project
 ```bash
 mkdir -p apps/pdf-bot
-curl -s -X POST 'http://localhost:7300/catalog/install' \
+curl -s -X POST 'http://localhost:443/catalog/install' \
   -H 'Content-Type: application/json' \
   -d '{"id":"agent:pdf-summarizer@1.4.2","target":"./apps/pdf-bot"}' | jq
 ```
@@ -47,4 +47,4 @@ pip install -U pip
 pip install -e .
 make dev
 ```
-# open http://localhost:7300/health
+# open http://localhost:443/health

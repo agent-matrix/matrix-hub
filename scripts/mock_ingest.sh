@@ -4,7 +4,7 @@ set -euo pipefail
 # ————————————————
 # Configuration (can override via environment)
 # ————————————————
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 DB_PATH="${DB_PATH:-./data/catalog.sqlite}"
 REMOTE_INDEX="${REMOTE_INDEX:-https://raw.githubusercontent.com/ruslanmv/hello-mcp/refs/heads/main/matrix/index.json}"
 ENTITY_UID="mcp_server:hello-sse-server@0.1.0"

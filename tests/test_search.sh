@@ -11,7 +11,7 @@
 #   7) Optional DB peek (if sqlite3 + DB_PATH provided)
 #
 # Env (override as needed):
-#   HUB_URL=http://127.0.0.1:7300
+#   HUB_URL=http://127.0.0.1:443
 #   API_TOKEN=...
 #   QUERY="Hello World"
 #   TYPE=mcp_server              # primary type to test
@@ -24,7 +24,7 @@
 
 set -euo pipefail
 
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 API_TOKEN="${API_TOKEN:-}"
 QUERY="${QUERY:-Hello World}"
 TYPE="${TYPE:-mcp_server}"

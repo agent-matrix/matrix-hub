@@ -80,11 +80,11 @@ RUN groupadd --system app && useradd --system -g app --home /app app && \
     chown -R app:app /app
 USER app
 
-EXPOSE 7300 4444
+EXPOSE 443 4444
 
 # Healthcheck for Hub
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:7300/" >/dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:443/" >/dev/null || exit 1
 
 # Default: run both via supervisor (entrypoint scrubs any SQLite before start)
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

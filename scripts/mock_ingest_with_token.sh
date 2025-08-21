@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # --- Configuration & Paths ---
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 REMOTE_URL="https://raw.githubusercontent.com/ruslanmv/hello-mcp/refs/heads/main/matrix/index.json"
 
 # Discover paths relative to the script's location

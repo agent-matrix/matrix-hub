@@ -18,7 +18,7 @@ jobs:
       MATRIX_REMOTES: "[]"
       LOG_LEVEL: INFO
       HOST: 127.0.0.1
-      PORT: "7300"
+      PORT: "443"
 
     steps:
       - name: Checkout

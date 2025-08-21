@@ -3,13 +3,13 @@
 ## Docker Compose (reference)
 
 - See `docker-compose.yaml` included in the repo.
-- Exposes the API on `:7300` and Postgres on `:5432`.
+- Exposes the API on `:443` and Postgres on `:5432`.
 
 ## Container image
 
 ```bash
 docker build -t ghcr.io/agent-matrix/matrix-hub:latest .
-docker run -p 7300:7300 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
+docker run -p 443:443 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
 ```
 
 ## Kubernetes (guidance)

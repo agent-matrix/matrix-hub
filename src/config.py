@@ -77,14 +77,14 @@ class Settings(BaseSettings):
     APP_NAME: str = "Matrix Hub"
     APP_VERSION: str = "0.1.0"
     HOST: str = "0.0.0.0"
-    PORT: int = 7300
+    PORT: int = 443
     LOG_LEVEL: str = "INFO"
     API_TOKEN: Optional[str] = None
 
     # Public-facing base URL used to build absolute links in API responses.
     # Safe default for local/dev; override via env in production.
     PUBLIC_BASE_URL: str = Field(
-        default="http://127.0.0.1:7300",
+        default="http://127.0.0.1:443",
         description="Public base URL for generating absolute links in API responses.",
         validation_alias=AliasChoices("PUBLIC_BASE_URL", "public_base_url"),
     )

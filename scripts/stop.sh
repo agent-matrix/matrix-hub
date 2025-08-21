@@ -6,7 +6,7 @@ set -euo pipefail
 # Load .env if present
 [ -f .env ] && export $(grep -v '^\s*#' .env | xargs)
 
-PORT=${PORT:-7300}
+PORT=${PORT:-443}
 
 echo "▶ Stopping any process listening on port ${PORT}…"
 # On macOS/Linux: find PID(s) listening on TCP port and kill them

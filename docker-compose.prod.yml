@@ -45,7 +45,7 @@ services:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://matrix:matrix@db:5432/matrixhub}
       INGEST_SCHED_ENABLED: "false"
       HOST: ${HOST:-0.0.0.0}
-      PORT: ${PORT:-7300}
+      PORT: ${PORT:-443}
     depends_on:
       db:
         condition: service_healthy
@@ -53,11 +53,11 @@ services:
       "/app/.venv/bin/gunicorn",
       "-k", "uvicorn.workers.UvicornWorker",
       "-w", "${WEB_CONCURRENCY:-4}",
-      "-b", "0.0.0.0:7300",
+      "-b", "0.0.0.0:443",
       "src.app:app"
     ]
     ports:
-      - "7300:7300"
+      - "443:443"
     restart: unless-stopped
 
   worker:

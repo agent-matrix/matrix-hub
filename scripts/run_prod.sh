@@ -44,7 +44,7 @@ HUB_GUNICORN="${HUB_VENV}/bin/gunicorn"
 HUB_UVICORN="${HUB_VENV}/bin/uvicorn"
 HUB_PYTHON="${HUB_VENV}/bin/python"
 HUB_HOST_DEFAULT="0.0.0.0"
-HUB_PORT_DEFAULT="7300"
+HUB_PORT_DEFAULT="443"
 HUB_APP_MODULE="${APP_MODULE:-src.app:app}"
 
 # Production tuning (override via env as needed)

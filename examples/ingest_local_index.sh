@@ -5,7 +5,7 @@ set -euo pipefail
 # Works with file paths or http(s) URLs inside the index.
 # Outcome: Federated Gateway registered against /sse, transport removed.
 
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 FILE_INDEX="${FILE_INDEX:-examples/local_index.json}"   # local index file (relative to REPO_ROOT)
 TARGET_DIR="${TARGET_DIR:-./}"
 

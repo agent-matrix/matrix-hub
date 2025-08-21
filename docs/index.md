@@ -37,7 +37,7 @@ flowchart LR
   H -->|register| G[MCP Gateway]
   H -->|adapters & matrix.lock.json| P[Your Project]
 ```
-API: FastAPI on `:7300`
+API: FastAPI on `:443`
 DB: PostgreSQL (SQLite supported for local dev)
 Scheduler: periodic ingestion of remote catalogs
 

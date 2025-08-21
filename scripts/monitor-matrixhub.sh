@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Simple health monitor for Matrix Hub.
 # ENV (or flags):
-#   HOST=0.0.0.0 PORT=7300 INTERVAL=5
+#   HOST=0.0.0.0 PORT=443 INTERVAL=5
 # Flags:
 #   --host H --port P --interval S --once
 #
@@ -13,7 +13,7 @@ set -euo pipefail
 #   2 = misconfigured (missing curl / bad args)
 
 HOST="${HOST:-0.0.0.0}"
-PORT="${PORT:-7300}"
+PORT="${PORT:-443}"
 INTERVAL="${INTERVAL:-5}"
 # Trim any whitespace passed from Make/env so 'sleep' doesn't choke.
 INTERVAL="$(printf '%s' "$INTERVAL" | tr -d '[:space:]')"

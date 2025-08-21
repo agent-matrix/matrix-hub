@@ -13,7 +13,7 @@ set -euo pipefail
 #
 # Requires: jq, curl, python
 
-HUB_URL="${HUB_URL:-http://127.0.0.1:7300}"
+HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
 SERVE_DIR="${SERVE_DIR:-.}"                 # repo root that contains /examples/...
 PORT="${PORT:-8000}"
 INDEX_PATH_REL="${INDEX_PATH_REL:-examples/index.json}"

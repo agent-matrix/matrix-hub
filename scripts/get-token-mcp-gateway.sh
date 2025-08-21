@@ -46,7 +46,7 @@ set +o allexport
 auth_user="${BASIC_AUTH_USERNAME:-admin}"
 jwt_secret="${JWT_SECRET_KEY:-my-test-key}"
 hub_host="${HOST:-0.0.0.0}" # Get HOST from .env, or use default
-hub_port="${PORT:-7300}"     # Get PORT from .env, or use default
+hub_port="${PORT:-443}"     # Get PORT from .env, or use default
 
 # 4. Mint an Admin JWT using loaded credentials
 log "⏳ Minting admin JWT for user '${auth_user}'..."

@@ -14,7 +14,7 @@ matrix install agent:pdf-summarizer@1.4.2 --target ./apps/pdf-bot
 
 ## API
 ```bash
-curl -s -X POST 'http://localhost:7300/catalog/install' \
+curl -s -X POST 'http://localhost:443/catalog/install' \
   -H 'Content-Type: application/json' \
   -d '{"id":"agent:pdf-summarizer@1.4.2","target":"./apps/pdf-bot"}' | jq
 ```

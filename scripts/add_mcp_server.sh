@@ -85,7 +85,7 @@ ok "Index updated → matrix/index.json"
 
 # -------- 3) Optional: register in a running Hub ----------
 if [[ "$REGISTER" -eq 1 ]]; then
-  : "${HUB_URL:?Set HUB_URL (e.g., http://127.0.0.1:7300)}"
+  : "${HUB_URL:?Set HUB_URL (e.g., http://127.0.0.1:443)}"
   : "${ADMIN_TOKEN:?Set ADMIN_TOKEN to your Hub’s API_TOKEN}"
 
   REMOTES_URL="${HUB_URL%/}/remotes"

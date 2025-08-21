@@ -164,12 +164,12 @@ if [[ "${NO_RUN:-0}" != "1" ]]; then
 
 → Step 4: Run the API (choose one)
 
-  uvicorn src.app:app --reload --port 7300
+  uvicorn src.app:app --reload --port 443
   # or
   make dev
 
 Health check (DB ping):
-  curl 'http://127.0.0.1:7300/health?check_db=true'
+  curl 'http://127.0.0.1:443/health?check_db=true'
 
 EONOTE
 fi

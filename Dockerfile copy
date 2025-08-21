@@ -4,7 +4,9 @@ FROM python:3.11-slim AS builder
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Build toolchain & git (for cloning gateway)
+# Install build-time dependencies:
+# - build-essential: For compiling Python packages
+# - git: For cloning the mcpgateway repository
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ libpq-dev git \
     && rm -rf /var/lib/apt/lists/*
@@ -12,65 +14,59 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # --- Hub Setup ---
+# Copy only the Hub's source code and necessary files first.
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 
-# Create Hub venv and install (include psycopg for Postgres)
+# Create Hub Virtual Environment (/app/.venv)
 RUN python -m venv /app/.venv && \
     /app/.venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/.venv/bin/pip install --no-cache-dir \
-      . \
-      'uvicorn[standard]' \
-      gunicorn \
-      alembic \
-      'psycopg[binary]'
+    /app/.venv/bin/pip install --no-cache-dir "." 'uvicorn[standard]' gunicorn alembic
 
 # --- Gateway Setup ---
-# Clone the gateway repository into /app/mcpgateway
+# Clone the gateway repository from GitHub into /app/mcpgateway
 RUN git clone --depth 1 https://github.com/IBM/mcp-context-forge.git /app/mcpgateway
 
-# Create Gateway venv and install
+# Create Gateway Virtual Environment (/app/mcpgateway/.venv) using the cloned code
 RUN python -m venv /app/mcpgateway/.venv && \
     /app/mcpgateway/.venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/mcpgateway/.venv/bin/pip install --no-cache-dir \
-      ./mcpgateway \
-      'uvicorn[standard]' \
-      gunicorn
+    /app/mcpgateway/.venv/bin/pip install --no-cache-dir ./mcpgateway 'uvicorn[standard]' gunicorn
 
 
-# Stage 2: Runtime image
+# Stage 2: Create the final production image
 FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:/app/mcpgateway/.venv/bin:${PATH}" \
-    INGEST_SCHED_ENABLED=false
+    PYTHONUNBUFFERED=1
 
-# Supervisor to optionally run multiple processes; curl for healthcheck
+# Install runtime dependencies (supervisor to run services, curl for healthcheck)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     supervisor curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy built artifacts and both virtualenvs
+# Copy the application code and both virtual environments from the builder stage.
 COPY --from=builder /app /app
 
-# Supervisor config (expected to start hub + gateway when used)
+# Copy the supervisor configuration file into the image.
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Security: non-root user
+# Create a non-root user and group for better security
+# FIXED: Changed --ingroup to -g for compatibility with this image's useradd command.
 RUN groupadd --system app && useradd --system -g app --home /app app && \
     chown -R app:app /app
+
+# Switch to the non-root user
 USER app
 
 EXPOSE 443 4444
 
-# Healthcheck for Hub
+# Healthcheck targets the Hub service
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS "http://127.0.0.1:443/" >/dev/null || exit 1
 
-# Default: supervisor (both Hub + Gateway). Compose can override `command:` to run API-only or Worker-only.
+# Start supervisor, which will manage both the Hub and Gateway processes
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]

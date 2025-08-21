@@ -15,7 +15,7 @@ Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 **Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
 
-* **API**: FastAPI on port **7300**
+* **API**: FastAPI on port **443**
 * **DB**: PostgreSQL (SQLite supported for lightweight/dev use)
 * **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed
 * **Install**: Idempotent steps, project adapters, lockfile generation
@@ -136,7 +136,7 @@ cp .env.example .env
 docker compose up -d --build
 
 # 4) Health check
-curl -s http://localhost:7300/health | jq
+curl -s http://localhost:443/health | jq
 ```
 
 You should see:
@@ -156,7 +156,7 @@ Key settings (common):
 | Variable                 | Purpose                                      | Example                                                                  |
 | :----------------------- | :------------------------------------------- | :----------------------------------------------------------------------- |
 | `DATABASE_URL`           | SQLAlchemy URL                               | `postgresql+psycopg://matrix:matrix@db:5432/matrixhub`                   |
-| `HOST` / `PORT`          | Bind address/port                            | `0.0.0.0` / `7300`                                                       |
+| `HOST` / `PORT`          | Bind address/port                            | `0.0.0.0` / `443`                                                       |
 | `MATRIX_REMOTES`         | CSV/JSON list of `index.json` URLs to ingest | `https://raw.githubusercontent.com/agent-matrix/catalog/main/index.json` |
 | `INGEST_INTERVAL_MIN`    | Background ingest interval (minutes)         | `15`                                                                     |
 | `API_TOKEN`              | Bearer token for admin/protected endpoints   | `set_me`                                                                 |
@@ -172,14 +172,14 @@ Key settings (common):
 
 ## API walk‑through
 
-Base URL defaults to `http://localhost:7300`.
+Base URL defaults to `http://localhost:443`.
 
 ### GET /health
 
 Liveness/readiness. Optional DB probe:
 
 ```bash
-curl -s 'http://localhost:7300/health?check_db=true' | jq
+curl -s 'http://localhost:443/health?check_db=true' | jq
 ```
 
 Returns:
@@ -207,7 +207,7 @@ Hybrid search over the catalog with optional filters.
 **Example**
 
 ```bash
-curl -s 'http://localhost:7300/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize&limit=5&with_rag=true' | jq
+curl -s 'http://localhost:443/catalog/search?q=summarize%20pdfs&type=agent&capabilities=pdf,summarize&limit=5&with_rag=true' | jq
 ```
 
 **Response (truncated)**
@@ -243,7 +243,7 @@ Fetch full entity details for a specific catalog ID.
 **Example**
 
 ```bash
-curl -s 'http://localhost:7300/catalog/entities/agent:pdf-summarizer@1.4.2' | jq
+curl -s 'http://localhost:443/catalog/entities/agent:pdf-summarizer@1.4.2' | jq
 ```
 
 ### POST /catalog/install
@@ -262,7 +262,7 @@ Compute and execute an install plan (pip/uv, docker, git, zip), write adapters i
 **Example**
 
 ```bash
-curl -s -X POST 'http://localhost:7300/catalog/install' \
+curl -s -X POST 'http://localhost:443/catalog/install' \
   -H 'Content-Type: application/json' \
   -d '{"id":"agent:pdf-summarizer@1.4.2","target":"./apps/pdf-bot"}' | jq
 ```
@@ -361,7 +361,7 @@ pip install -e .
 # 3) Run with auto-reload
 make dev
 # or
-uvicorn src.app:app --reload --port 7300
+uvicorn src.app:app --reload --port 443
 ```
 
 **Quality & tests**
@@ -406,7 +406,7 @@ In production, run migrations as part of your deploy step (e.g., init container 
 
 ```bash
 docker build -t ghcr.io/agent-matrix/matrix-hub:latest .
-docker run -p 7300:7300 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
+docker run -p 443:443 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
 ```
 
 **Database:** Use PostgreSQL in production. SQLite is supported for quick local trials only.
