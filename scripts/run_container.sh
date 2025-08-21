@@ -30,7 +30,7 @@ CONTAINER_NAME="${CONTAINER_NAME:-matrixhub}"
 # ---------------------------
 # Ports
 # ---------------------------
-HUB_PORT="${HUB_PORT:-7300}"
+HUB_PORT="${HUB_PORT:-443}"
 GATEWAY_PORT="${GATEWAY_PORT:-4444}"
 
 # ---------------------------
@@ -234,7 +234,7 @@ fi
 docker run -d \
   --name "${CONTAINER_NAME}" \
   --network "${NETWORK_NAME}" \
-  -p "${HUB_PORT}:7300" \
+  -p "${HUB_PORT}:443" \
   -p "${GATEWAY_PORT}:4444" \
   --restart unless-stopped \
   -v "${HUB_ENV_HOST_PATH}:${HUB_ENV_IN_CONTAINER}:ro" \
@@ -250,7 +250,7 @@ docker run -d \
     bash '"${CONT_START_SCRIPT}"' &
 
     # Start Hub (foreground)
-    exec /app/.venv/bin/gunicorn src.app:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:7300
+    exec /app/.venv/bin/gunicorn src.app:app -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:443
   '
 
 echo

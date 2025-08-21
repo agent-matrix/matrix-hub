@@ -5,7 +5,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/matrix-hub}"
 REPO_URL="${REPO_URL:-https://github.com/agent-matrix/matrix-hub}"
 SOURCE_DIR="${SOURCE_DIR:-}"
-EXPOSE_API_PORT="${EXPOSE_API_PORT:-7300}"
+EXPOSE_API_PORT="${EXPOSE_API_PORT:-443}"
 EXPOSE_GATEWAY_PORT="${EXPOSE_GATEWAY_PORT:-4444}"
 POSTGRES_USER="${POSTGRES_USER:-matrix}"
 POSTGRES_DB="${POSTGRES_DB:-matrixhub}"
