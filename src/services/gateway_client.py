@@ -15,6 +15,10 @@ Key behaviors:
   * Auth: Bearer JWT minted just-in-time via get_mcp_admin_token().
   * Retries: automatically retries transient failures (5xx or network errors).
   * Idempotency: callers can set idempotent=True to treat 409 (Conflict) as success.
+
+Performance notes (minor, safe optimizations):
+  * Single persistent httpx.Client with HTTP/2 + connection pooling (keep-alive).
+  * Bounded concurrency for bulk resource/prompt registration.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ import json
 import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional, Union, TYPE_CHECKING
+from concurrent.futures import ThreadPoolExecutor, as_completed  # NEW
 
 import httpx
 from pathlib import Path
@@ -65,6 +70,7 @@ class GatewayClientError(RuntimeError):
 class InstallError(Exception):
     """Raised when an installation or registration step is invalid or cannot proceed."""
     pass
+
 # --------------------------------------------------------------------------------------
 # Core client
 # --------------------------------------------------------------------------------------
@@ -103,6 +109,25 @@ class MCPGatewayClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
         }
+
+        # NEW: persistent HTTP client with HTTP/2 and connection pooling
+        limits = httpx.Limits(
+            max_connections=int(getattr(settings, "GATEWAY_HTTP_MAX_CONNECTIONS", 20)),
+            max_keepalive_connections=int(getattr(settings, "GATEWAY_HTTP_MAX_KEEPALIVE", 10)),
+            keepalive_expiry=float(getattr(settings, "GATEWAY_HTTP_KEEPALIVE_SECS", 30.0)),
+        )
+        self._client = httpx.Client(  # thread-safe client, reused across requests
+            http2=True,
+            timeout=self.timeout,
+            headers=self._base_headers,
+            limits=limits,
+        )
+
+    def __del__(self) -> None:  # best-effort close on GC (process exit will also clean up)
+        try:
+            self._client.close()
+        except Exception:
+            pass
 
     # -----------------------
     # Public convenience APIs
@@ -154,84 +179,87 @@ class MCPGatewayClient:
     # Internal HTTP helpers
     # -----------------------
     def _request(
-            self,
-            method: str,
-            path: str,
-            *,
-            json_body: Optional[Dict[str, Any]] = None,
-            params: Optional[Dict[str, Any]] = None,
-            ok_on_conflict: bool = False,
-        ) -> httpx.Response:
-            """Core HTTP logic with auth, retries, and error handling."""
-            url = f"{self.base_url}{path}"
-            attempts = max(1, self.max_retries)
-            last_exc: Optional[Exception] = None
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: Optional[Dict[str, Any]] = None,
+        params: Optional[Dict[str, Any]] = None,
+        ok_on_conflict: bool = False,
+    ) -> httpx.Response:
+        """Core HTTP logic with auth, retries, and error handling."""
+        url = f"{self.base_url}{path}"
+        attempts = max(1, self.max_retries)
+        last_exc: Optional[Exception] = None
 
-            for attempt in range(1, attempts + 1):
-                try:
-                    token = get_mcp_admin_token(
-                        secret=self.jwt_secret,
-                        username=self.jwt_username,
-                        ttl_seconds=300,
-                        fallback_token=self.fallback_token,
+        for attempt in range(1, attempts + 1):
+            try:
+                token = get_mcp_admin_token(
+                    secret=self.jwt_secret,
+                    username=self.jwt_username,
+                    ttl_seconds=300,
+                    fallback_token=self.fallback_token,
+                )
+            except Exception as exc:
+                raise GatewayClientError(f"Auth token error: {exc}")
+
+            # Accept tokens returned either as a raw JWT or already prefixed ("Bearer ..." or "Basic ...")
+            t = (token or "").strip()
+            if t.lower().startswith("bearer ") or t.lower().startswith("basic "):
+                auth_value = t
+            else:
+                auth_value = f"Bearer {t}"
+            headers = {**self._base_headers, "Authorization": auth_value}
+
+            try:
+                logger.debug("gw.request", extra={"method": method, "url": url, "attempt": attempt})
+                # REUSE the persistent client; pass per-request headers
+                resp = self._client.request(method, url, json=json_body, params=params, headers=headers)
+
+                logger.info("gw.response", extra={"method": method, "url": url, "status": resp.status_code})
+
+                if resp.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"Server error {resp.status_code}", request=resp.request, response=resp
                     )
-                except Exception as exc:
-                    raise GatewayClientError(f"Auth token error: {exc}")
 
-                # Accept tokens returned either as a raw JWT or already prefixed ("Bearer ..." or "Basic ...")
-                t = (token or "").strip()
-                if t.lower().startswith("bearer ") or t.lower().startswith("basic "):
-                    auth_value = t
-                else:
-                    auth_value = f"Bearer {t}"
-                headers = {**self._base_headers, "Authorization": auth_value}
-
-                try:
-                    logger.debug("gw.request", extra={"method": method, "url": url, "attempt": attempt})
-                    with httpx.Client(timeout=self.timeout, headers=headers) as client:
-                        resp = client.request(method, url, json=json_body, params=params)
-
-                    logger.info("gw.response", extra={"method": method, "url": url, "status": resp.status_code})
-
-                    if resp.status_code >= 500:
-                        raise httpx.HTTPStatusError(
-                            f"Server error {resp.status_code}", request=resp.request, response=resp
-                        )
-
-                    if resp.status_code == 409 and ok_on_conflict:
-                        return resp
-
-                    if 400 <= resp.status_code < 500:
-                        try:
-                            body = resp.json()
-                        except Exception:
-                            body = resp.text
-                        raise GatewayClientError(
-                            f"{method} {path} failed ({resp.status_code})",
-                            status_code=resp.status_code,
-                            body=body,
-                        )
+                if resp.status_code == 409 and ok_on_conflict:
                     return resp
 
-                except httpx.HTTPStatusError as exc:
-                    last_exc = exc
-                    logger.warning(
-                        "gw.retry.server",
-                        extra={"attempt": attempt, "of": attempts, "status": getattr(exc.response, "status_code", None)},
+                if 400 <= resp.status_code < 500:
+                    try:
+                        body = resp.json()
+                    except Exception:
+                        body = resp.text
+                    raise GatewayClientError(
+                        f"{method} {path} failed ({resp.status_code})",
+                        status_code=resp.status_code,
+                        body=body,
                     )
-                    self._sleep_backoff(attempt)
-                except httpx.RequestError as exc:
-                    last_exc = exc
-                    logger.warning(
-                        "gw.retry.network", extra={"attempt": attempt, "of": attempts, "error": str(exc)}
-                    )
-                    self._sleep_backoff(attempt)
+                return resp
 
-            if isinstance(last_exc, GatewayClientError):
-                raise last_exc
-            raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
+            except GatewayClientError as exc:
+                # logic paths above raise GatewayClientError explicitly
+                raise exc
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                logger.warning(
+                    "gw.retry.server",
+                    extra={
+                        "attempt": attempt,
+                        "of": attempts,
+                        "status": getattr(exc.response, "status_code", None),
+                    },
+                )
+                self._sleep_backoff(attempt)
+            except httpx.RequestError as exc:
+                last_exc = exc
+                logger.warning(
+                    "gw.retry.network", extra={"attempt": attempt, "of": attempts, "error": str(exc)}
+                )
+                self._sleep_backoff(attempt)
 
-
+        raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
 
     def _get_json(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
         resp = self._request("GET", path, params=params)
@@ -271,38 +299,88 @@ def register_tool(tool_spec: Dict[str, Any], *, idempotent: bool = False) -> Dic
 
 
 def register_resources(resources: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:
-    """Bulk helper to register resources (POST /resources per item)."""
+    """
+    Bulk helper to register resources (POST /resources per item).
+
+    Minor performance improvement: submit in parallel with bounded workers.
+    Keeps behavior/validation identical (raises on error).
+    """
+    items = list(resources or [])
+    if not items:
+        return []
+
     client = _client()
-    results: List[Dict[str, Any]] = []
-    for r in resources or []:
+    max_workers = max(1, int(getattr(settings, "GATEWAY_BULK_WORKERS", 8)))
+
+    results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+    errors: List[Exception] = []
+
+    def worker(idx: int, payload: Dict[str, Any]) -> None:
         try:
-            resp = client.create_resource(r, idempotent=idempotent)
-            # ensure numeric id
-            rid = resp.get('id')
+            resp = client.create_resource(payload, idempotent=idempotent)
+            rid = resp.get("id")
             if not isinstance(rid, int):
                 raise GatewayClientError("Resource response missing numeric 'id'", status_code=None, body=resp)
-            results.append(resp)
-        except GatewayClientError as e:
-            logger.error("Resource registration failed: %s", e)
-            raise
-    return results
+            results[idx] = resp
+        except Exception as e:
+            errors.append(e)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = [pool.submit(worker, i, p) for i, p in enumerate(items)]
+        for f in as_completed(futs):
+            _ = f.result()  # propagate exceptions if any (they're also captured in errors)
+
+    if errors:
+        # Preserve previous semantics: raise on failure.
+        e = errors[0]
+        logger.error("Resource registration failed: %s", e)
+        if isinstance(e, GatewayClientError):
+            raise e
+        raise GatewayClientError(str(e))
+
+    return [r for r in results if r is not None]
 
 
 def register_prompts(prompts: Iterable[Dict[str, Any]], *, idempotent: bool = False) -> List[Dict[str, Any]]:
-    """Bulk helper to register prompts (POST /prompts per item)."""
+    """
+    Bulk helper to register prompts (POST /prompts per item).
+
+    Minor performance improvement: submit in parallel with bounded workers.
+    Keeps behavior/validation identical (raises on error).
+    """
+    items = list(prompts or [])
+    if not items:
+        return []
+
     client = _client()
-    results: List[Dict[str, Any]] = []
-    for p in prompts or []:
+    max_workers = max(1, int(getattr(settings, "GATEWAY_BULK_WORKERS", 8)))
+
+    results: List[Optional[Dict[str, Any]]] = [None] * len(items)
+    errors: List[Exception] = []
+
+    def worker(idx: int, payload: Dict[str, Any]) -> None:
         try:
-            resp = client.create_prompt(p, idempotent=idempotent)
-            pid = resp.get('id')
+            resp = client.create_prompt(payload, idempotent=idempotent)
+            pid = resp.get("id")
             if not isinstance(pid, int):
                 raise GatewayClientError("Prompt response missing numeric 'id'", status_code=None, body=resp)
-            results.append(resp)
-        except GatewayClientError as e:
-            logger.error("Prompt registration failed: %s", e)
-            raise
-    return results
+            results[idx] = resp
+        except Exception as e:
+            errors.append(e)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futs = [pool.submit(worker, i, p) for i, p in enumerate(items)]
+        for f in as_completed(futs):
+            _ = f.result()
+
+    if errors:
+        e = errors[0]
+        logger.error("Prompt registration failed: %s", e)
+        if isinstance(e, GatewayClientError):
+            raise e
+        raise GatewayClientError(str(e))
+
+    return [r for r in results if r is not None]
 
 
 def register_gateway(gateway_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
@@ -347,10 +425,10 @@ def register_server(server_spec: Dict[str, Any], *, idempotent: bool = False) ->
                 'uri': uri,
             }
         try:
-            r_resp = client.create_resource(r_payload, idempotent=idempotent)
-            rid = r_resp.get('id')
+            resp = client.create_resource(r_payload, idempotent=idempotent)
+            rid = resp.get('id')
             if not isinstance(rid, int):
-                raise GatewayClientError("Resource response missing numeric 'id'", status_code=None, body=r_resp)
+                raise GatewayClientError("Resource response missing numeric 'id'", status_code=None, body=resp)
             resource_ids.append(rid)
         except GatewayClientError as e:
             logger.error("Failed to register resource '%s': %s", r_payload['id'], e)

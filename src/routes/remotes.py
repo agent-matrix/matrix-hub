@@ -6,12 +6,16 @@ from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import BackgroundTasks
+import uuid
+from pathlib import Path
+import time
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..db import get_db
-from ..models import Remote, Entity  
+from ..models import Remote, Entity
 from ..services.ingest import ingest_index
 from ..services.install import sync_registry_gateways
 from ..utils.security import require_api_token
@@ -20,6 +24,19 @@ from ..utils.security import require_api_token
 log = logging.getLogger(__name__)
 router = APIRouter(tags=["remotes"])
 
+# --- lightweight job status (file-based; no new DB tables) ---
+STATUS_DIR = Path("/tmp/matrixhub-sync")
+STATUS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _status_path(job_id: str) -> Path:
+    return STATUS_DIR / f"{job_id}.json"
+
+def _write_status(job_id: str, payload: Dict[str, Any]) -> None:
+    try:
+        payload.setdefault("job_id", job_id)
+        _status_path(job_id).write_text(json.dumps(payload), encoding="utf-8")
+    except Exception:
+        log.exception("Failed to write sync status for job %s", job_id)
 
 # --------------------------------------------------------------------------------------
 # Pydantic models
@@ -135,19 +152,10 @@ def _parse_initial_remotes() -> Set[str]:
             out.append(u)
     return set(out)
 
-
 # --------------------------------------------------------------------------------------
-# Endpoints
+# Core sync (shared by sync endpoint and background task)
 # --------------------------------------------------------------------------------------
-
-@router.post("/remotes/sync")
-def sync_remotes(db: Session = Depends(get_db)):
-    """
-    Trigger a full sync: ingest all configured remotes into Matrix Hub,
-    then re-affirm their registration in MCP-Gateway.
-
-    Returns a summary of ingested URLs, any errors, and whether gateways were synced.
-    """
+def _perform_full_sync(db: Session, *, raise_on_gateway_error: bool) -> Dict[str, Any]:
     # Gather all remote URLs from the DB; if empty, seed from MATRIX_REMOTES
     remotes = [r.url for r in db.query(Remote).all()]
     seeded = False
@@ -161,8 +169,7 @@ def sync_remotes(db: Session = Depends(get_db)):
             remotes = [r.url for r in db.query(Remote).all()]
 
     if not remotes:
-        # Still nothing to ingest; return early with a clear status
-        return {"status": "no remotes configured", "seeded": seeded}
+        return {"status": "no remotes configured", "seeded": seeded, "ingested": [], "errors": {}, "synced": False, "count": 0}
 
     success: List[str] = []
     failures: Dict[str, str] = {}
@@ -171,31 +178,93 @@ def sync_remotes(db: Session = Depends(get_db)):
     for url in remotes:
         try:
             ingest_index(db=db, index_url=url)
-            db.commit()                      # Persist ingest results immediately
+            db.commit()
             success.append(url)
         except Exception as e:
-            db.rollback()                    # Undo partial work for this URL
+            db.rollback()
             log.warning("Ingest failed for %s: %s", url, e)
             failures[url] = str(e)
 
     # 2) Re-register gateways only if at least one ingest succeeded
     synced = False
+    gateway_error: Optional[str] = None
     if success:
         try:
             sync_registry_gateways(db)
             synced = True
         except Exception as e:
+            gateway_error = str(e)
             log.exception("Gateway sync failed after ingest")
-            raise HTTPException(status_code=500, detail=f"Gateway sync error: {e}")
+            if raise_on_gateway_error:
+                raise
 
-    # Return detailed summary
     return {
         "seeded": seeded,
         "ingested": success,
         "errors": failures,
         "synced": synced,
+        "gateway_error": gateway_error,
         "count": len(remotes),
     }
+
+def _run_sync_in_background(job_id: str) -> None:
+    """Runs the full sync in a new DB session; writes status snapshots to /tmp."""
+    try:
+        _write_status(job_id, {"state": "running"})
+        # open a fresh session (don’t reuse request-scoped session)
+        from ..db import SessionLocal  # typical pattern; available alongside get_db
+        db = SessionLocal()
+        try:
+            summary = _perform_full_sync(db, raise_on_gateway_error=False)
+            _write_status(job_id, {"state": "finished", "summary": summary})
+        finally:
+            db.close()
+    except Exception as e:
+        log.exception("Background sync job %s failed", job_id)
+        _write_status(job_id, {"state": "error", "error": str(e)})
+
+# --------------------------------------------------------------------------------------
+# Endpoints
+# --------------------------------------------------------------------------------------
+
+@router.post("/remotes/sync", status_code=status.HTTP_202_ACCEPTED)
+def sync_remotes(
+    background: BackgroundTasks,
+    wait: bool = False,
+    db: Session = Depends(get_db),
+):
+    """
+    Trigger a full sync: ingest all configured remotes into Matrix Hub,
+    then re-affirm their registration in MCP-Gateway.
+
+    Returns a summary of ingested URLs, any errors, and whether gateways were synced.
+    """
+    # Backward-compat mode: keep old synchronous behavior on demand (non-CF usage).
+    if wait:
+        # preserve previous semantics: raise on gateway error
+        return _perform_full_sync(db, raise_on_gateway_error=True)
+
+    # Default: run in background to avoid Cloudflare 524; return 202 + job id.
+    job_id = uuid.uuid4().hex
+    _write_status(job_id, {"state": "accepted"})
+    background.add_task(_run_sync_in_background, job_id)
+    return {
+        "job_id": job_id,
+        "state": "accepted",
+        "status_url": f"/remotes/sync/{job_id}",
+        "hint": "poll status_url or call with ?wait=1 for synchronous mode (may time out at the edge).",
+    }
+
+@router.get("/remotes/sync/{job_id}")
+def get_sync_status(job_id: str):
+    """Poll background sync status."""
+    p = _status_path(job_id)
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="job not found")
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"failed to read status: {e}")
 
 # --- add this endpoint (e.g., after /remotes/sync) ---
 @router.get(

@@ -34,12 +34,14 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import yaml
 from sqlalchemy.orm import Session
 
 from ..models import Entity
+from ..config import settings
 from src.db import save_entity
 # Optional dependencies (best-effort usage)
 try:
@@ -61,6 +63,66 @@ except Exception:  # pragma: no cover
     register_tool = register_server = register_resources = register_prompts = register_gateway = trigger_discovery = None  # type: ignore
 
 log = logging.getLogger("install")
+
+
+def _normalize_sse_messages_url(base: str, transport: str) -> str:
+    base = (base or "").rstrip("/")
+    t = (transport or "").upper()
+    if base and t == "SSE" and not base.endswith("/messages/"):
+        if base.endswith("/messages"):
+            base += "/"
+        else:
+            base += "/messages/"
+    return base
+
+
+def _gw_sync_worker(job: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Runs the Tool → Resources → Prompts → Gateway sequence for one entity.
+    Returns {'uid', 'ok', 'name', 'error'(opt), 'resource_ids', 'prompt_ids'}.
+    """
+    from . import gateway_client as gw  # lazy import like before
+    uid = job["uid"]
+    tool_spec = job["tool_spec"]
+    resources = job["resources"]
+    prompts = job["prompts"]
+    server = job["server"]
+    ent_name = job["ent_name"]
+
+    try:
+        # 1) Tool
+        if tool_spec:
+            t_spec = {**tool_spec}
+            t_spec["name"] = t_spec.get("name") or t_spec.get("id")
+            gw.register_tool(t_spec, idempotent=True)
+
+        # 2) Resources
+        resource_ids: List[int] = []
+        if resources:
+            res_resps = gw.register_resources(resources, idempotent=True)
+            resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
+
+        # 3) Prompts
+        prompt_ids: List[int] = []
+        if prompts:
+            pr_resps = gw.register_prompts(prompts, idempotent=True)
+            prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
+
+        # 4) Gateway
+        base = _normalize_sse_messages_url(server.get("url") or "", server.get("transport") or "")
+        gw_payload = {
+            "name": server.get("name") or ent_name,
+            "description": server.get("description", ""),
+            "url": base,
+            "associated_tools": [tool_spec.get("id")] if tool_spec.get("id") else [],
+            "associated_resources": resource_ids,
+            "associated_prompts": prompt_ids,
+        }
+        gw.register_gateway(gw_payload, idempotent=True)
+
+        return {"uid": uid, "ok": True, "name": gw_payload["name"], "resource_ids": resource_ids, "prompt_ids": prompt_ids}
+    except Exception as e:
+        return {"uid": uid, "ok": False, "error": str(e), "name": server.get("name") or ent_name}
 
 
 # --------------------------------------------------------------------------------------
@@ -105,74 +167,53 @@ def sync_registry_gateways(db: Session) -> None:
           )
           .all()
     )
+    if not new_servers:
+        return
 
-    # Lazy import here to avoid circular imports and silent disablement
-    from . import gateway_client as gw
-
+    # Build jobs (extract once from DB rows)
+    jobs: List[Dict[str, Any]] = []
     for ent in new_servers:
-        # Pull the mcp_registration block that should have been persisted at ingest
         reg = getattr(ent, "mcp_registration", {}) or {}
-        tool_spec = (reg.get("tool") or {}) if isinstance(reg, dict) else {}
-        resources = (reg.get("resources") or []) if isinstance(reg, dict) else []
-        server = (reg.get("server") or {}) if isinstance(reg, dict) else {}
-        prompts = (reg.get("prompts") or []) if isinstance(reg, dict) else []
+        jobs.append({
+            "uid": ent.uid,
+            "ent_name": ent.name,
+            "tool_spec": (reg.get("tool") or {}) if isinstance(reg, dict) else {},
+            "resources": (reg.get("resources") or []) if isinstance(reg, dict) else [],
+            "prompts": (reg.get("prompts") or []) if isinstance(reg, dict) else [],
+            "server": (reg.get("server") or {}) if isinstance(reg, dict) else {},
+        })
 
+    # Run gateway calls concurrently (I/O-bound), keep DB writes on main thread
+    max_workers = max(1, int(getattr(settings, "GATEWAY_SYNC_WORKERS", 8)))
+    results: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futmap = {pool.submit(_gw_sync_worker, j): j["uid"] for j in jobs}
+        for fut in as_completed(futmap):
+            results.append(fut.result())
+
+    # Persist results sequentially, per entity (same semantics as before)
+    for res in results:
+        uid = res["uid"]
+        ent = db.get(Entity, uid)
+        if not ent:
+            continue
         try:
-            # 1) Tool (ensure name is set; gateway expects name)
-            if tool_spec:
-                log.info("sync.gw", extra={"step": "tool", "name": tool_spec.get("name") or tool_spec.get("id")})
-                t_spec = {**tool_spec}
-                t_spec["name"] = t_spec.get("name") or t_spec.get("id")
-                gw.register_tool(t_spec, idempotent=True)
-
-            # 2) Resources → collect numeric IDs
-            resource_ids: List[int] = []
-            if resources:
-                log.info("sync.gw", extra={"step": "resources", "count": len(resources)})
-                res_resps = gw.register_resources(resources, idempotent=True)
-                resource_ids = [r.get("id") for r in res_resps if isinstance(r.get("id"), int)]
-
-            # 3) Prompts → collect numeric IDs
-            prompt_ids: List[int] = []
-            if prompts:
-                log.info("sync.gw", extra={"step": "prompts", "count": len(prompts)})
-                pr_resps = gw.register_prompts(prompts, idempotent=True)
-                prompt_ids = [p.get("id") for p in pr_resps if isinstance(p.get("id"), int)]
-
-            # 4) Federated Gateway (/gateways). Normalize SSE endpoint if needed.
-            base = (server.get("url") or "").rstrip("/")
-            transport = (server.get("transport") or "").upper()
-            if base and transport == "SSE" and not base.endswith("/messages/"):
-                base = f"{base}/messages/"
-
-            gw_payload = {
-                "name": server.get("name", ent.name),
-                "description": server.get("description", ""),
-                "url": base,
-                "associated_tools": [tool_spec.get("id")] if tool_spec.get("id") else [],
-                "associated_resources": resource_ids,
-                "associated_prompts": prompt_ids,
-            }
-
-            # 4) Federated Gateway (/gateways)
-            log.info("sync.gw", extra={"step": "gateway", "name": gw_payload["name"], "url": gw_payload.get("url")})
-            gw.register_gateway(gw_payload, idempotent=True)
-
-            # Success: mark registered _after_ /gateways succeeds
-            ent.gateway_registered_at = datetime.utcnow()
-            if hasattr(ent, "gateway_error"):
-                ent.gateway_error = None
-            db.add(ent)
-            db.commit()
-            log.info("✓ Federated gateway synced: %s", gw_payload["name"]) 
-
-        except Exception as e:
-            # Failure: store error per-entity so retries can pick it up
-            if hasattr(ent, "gateway_error"):
-                ent.gateway_error = str(e)
-            db.add(ent)
-            db.commit()
-            log.warning("⚠️ Gateway sync failed for %s: %s", ent.uid, e)
+            if res.get("ok"):
+                ent.gateway_registered_at = datetime.utcnow()
+                if hasattr(ent, "gateway_error"):
+                    ent.gateway_error = None
+                db.add(ent)
+                db.commit()
+                log.info("✓ Federated gateway synced: %s", res.get("name"))
+            else:
+                if hasattr(ent, "gateway_error"):
+                    ent.gateway_error = res.get("error") or "gateway sync failed"
+                db.add(ent)
+                db.commit()
+                log.warning("⚠️ Gateway sync failed for %s: %s", uid, res.get("error"))
+        except Exception:
+            db.rollback()
+            log.exception("DB error while recording gateway sync result for %s", uid)
 
 
 def install_entity(
@@ -211,7 +252,7 @@ def install_entity(
     except Exception:
         db.rollback()
         log.exception("💥 Failed to save Entity[%s] to DB", uid)
-        raise                         # abort on DB failure
+        raise                       # abort on DB failure
 
     # Compute plan
     plan = _build_install_plan(manifest)

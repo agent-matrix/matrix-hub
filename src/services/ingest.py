@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
+from concurrent.futures import ThreadPoolExecutor, as_completed  # <-- added
+
 import httpx
 import yaml
 from sqlalchemy.orm import Session
@@ -38,7 +40,6 @@ from .search.backends import embedder, vector, blobstore  # type_ignore
 from ..db import save_entity
 
 log = logging.getLogger("ingest")
-
 
 
 # ----------------- Public API -----------------
@@ -89,9 +90,64 @@ class RemoteIngestResult:
     embeddings_upserted: int = 0
 
 
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# Internal: concurrent fetch/parse/validate (no DB work in threads)
+# ----------------------------------------------------------------------
+def _prefetch_manifests(manifest_urls: List[str]) -> List[tuple[str, Dict[str, Any]]]:
+    """
+    Fetch+parse+validate manifests concurrently. Returns list of (url, manifest).
+    DB writes are intentionally NOT done here to keep Session usage single-threaded.
+    """
+    max_workers = max(1, int(getattr(settings, "INGEST_MAX_FETCH_WORKERS", 8)))
+    results: List[tuple[str, Dict[str, Any]]] = []
+
+    def worker(u: str) -> tuple[str, Optional[Dict[str, Any]], Optional[str], bool]:
+        # (url, manifest_or_none, error_message_or_none, is_skip)
+        try:
+            m = _fetch_and_parse_manifest(u)
+            m = _maybe_validate(m, source=u)
+            return (u, m, None, False)
+        except SkipManifest as sk:
+            return (u, None, str(sk), True)
+        except Exception as e:
+            return (u, None, str(e), False)
+
+    if not manifest_urls:
+        return results
+
+    with ThreadPoolExecutor(max_workers=max_workers) as ex:
+        future_map = {ex.submit(worker, u): u for u in manifest_urls}
+        for fut in as_completed(future_map):
+            u = future_map[fut]
+            try:
+                url, manifest, err, is_skip = fut.result()
+                if manifest is not None:
+                    results.append((url, manifest))
+                else:
+                    if is_skip:
+                        log.warning("ingest.skip", extra={"url": url, "reason": err})
+                    else:
+                        # keep parity with previous logging: log.exception on generic failure
+                        log.exception("ingest.manifest.error", extra={"url": url, "reason": err})
+            except Exception as e:
+                # Extremely rare: failure in worker result retrieval
+                log.exception("ingest.manifest.error", extra={"url": u, "reason": str(e)})
+
+    return results
+
+
+# ----------------------------------------------------------------------
 # Ingest a single remote index (with detailed logging)
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
+def _indicates_sse_messages_url(url: str, transport: str) -> str:
+    """Normalize SSE server URL to end with /messages/ if required."""
+    normalized = url.rstrip("/")
+    if transport == "SSE" and normalized:
+        if normalized.endswith("/messages"):
+            normalized = normalized + "/"
+        elif not normalized.endswith("/messages/"):
+            normalized = normalized + "/messages/"
+    return normalized
 
 def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResult:
     log = logging.getLogger("ingest")
@@ -106,11 +162,12 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
         extra={"remote": remote, "manifests_found": len(manifest_urls)},
     )
 
-    for m_url in manifest_urls:
+    # NEW: fetch/parse/validate manifests concurrently (network-bound)
+    fetched: List[tuple[str, Dict[str, Any]]] = _prefetch_manifests(manifest_urls)
+
+    # Process sequentially for DB safety
+    for m_url, manifest in fetched:
         try:
-            log.debug("ingest.manifest.fetch", extra={"url": m_url})
-            manifest = _fetch_and_parse_manifest(m_url)
-            manifest = _maybe_validate(manifest, source=m_url)
             log.debug(
                 "ingest.manifest.validated",
                 extra={
@@ -148,7 +205,7 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
                     extra={"uid": getattr(entity, "uid", None), "chunks": emb_count},
                 )
 
-            # 4) Optional: re-register federated gateway in MCP‑Gateway for mcp_server
+            # 4) Optional: re-register federated gateway in MCP-Gateway for mcp_server
             try:
                 if manifest.get("type") == "mcp_server":
                     # For federated MCP servers, register a Gateway (POST /gateways)
@@ -159,13 +216,10 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
 
                     name = server.get("name") or (manifest.get("name") or manifest.get("id"))
                     description = server.get("description") or ""
-                    url = (server.get("url") or "").rstrip("/")
+                    url = (server.get("url") or "").strip()
                     transport = (server.get("transport") or "").upper()
-                    if url and transport == "SSE" and not url.endswith("/messages/"):
-                        if url.endswith("/messages"):
-                            url = f"{url}/"
-                        else:
-                            url = f"{url}/messages/"
+                    if url:
+                        url = _indicates_sse_messages_url(url, transport)
 
                     if url:
                         try:
@@ -185,7 +239,7 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
                                     "ok": True,
                                 },
                             )
-                        except Exception as e:  # best‑effort; do not fail ingest
+                        except Exception as e:  # best-effort; do not fail ingest
                             log.warning(
                                 "ingest.gateway.register.error %s",
                                 e,
@@ -227,18 +281,18 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
     return res
 
 
-
 # ----------------- Manifest fetch/parse/validate -----------------
 
 def _fetch_json(url: str) -> Dict[str, Any]:
-    with httpx.Client(timeout=20.0) as client:
+    # Enable HTTP/2 for better multiplexing with some hosts (minor perf win)
+    with httpx.Client(timeout=20.0, http2=True) as client:  # <-- http2=True
         r = client.get(url)
         r.raise_for_status()
         return r.json()
 
 
 def _fetch_text(url: str) -> str:
-    with httpx.Client(timeout=20.0) as client:
+    with httpx.Client(timeout=20.0, http2=True) as client:  # <-- http2=True
         r = client.get(url)
         r.raise_for_status()
         return r.text
@@ -484,11 +538,9 @@ def ingest_manifest(manifest: Dict[str, Any], db: Session, do_embed: bool = True
     return entity
 
 
-
-# ------------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # Entry points for the API layer to consume
-# ------------------------------------------------------------------------------
-
+# ----------------------------------------------------------------------
 def ingest_index(db: Session, index_url: str) -> Dict[str, Any]:
     """Entry point expected by the /ingest endpoint: Ingest a remote index.json URL."""
     log = logging.getLogger("ingest")
