@@ -67,7 +67,7 @@ Next:
 
   # Run Gateway+Hub via supervisor (default CMD). Be sure to mount a Postgres .env for the Gateway:
   #   /app/mcpgateway/.env must contain: DATABASE_URL=postgresql+psycopg://matrix:matrix@<db-host>:5432/mcpgateway
-  docker run -d --name matrix-hub-production \
+  docker run -d --name matrixhub \
     -p 443:443 -p 4444:4444 \
     -v "$PWD/.env.gateway:/app/mcpgateway/.env:ro" \
     matrixhub:latest

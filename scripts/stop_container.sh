@@ -8,7 +8,7 @@ set -Eeuo pipefail
 
 # --- Configuration ---
 # This must match the name used in run_container.sh
-CONTAINER_NAME="${CONTAINER_NAME:-matrix-hub-production}"
+CONTAINER_NAME="${CONTAINER_NAME:-matrixhub}"
 
 # --- Main Stop Logic ---
 
