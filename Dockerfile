@@ -26,7 +26,8 @@ RUN python -m venv /app/.venv && \
       'uvicorn[standard]' \
       gunicorn \
       alembic \
-      'psycopg[binary]'
+      'psycopg[binary]' \
+      'httpx[http2]'
 
 # --- Gateway Setup ---
 # Allow pinning a specific ref/tag/branch at build time: --build-arg GATEWAY_REF=<ref>
