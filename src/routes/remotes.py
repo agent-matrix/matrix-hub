@@ -570,3 +570,4 @@ def _ingest_one(db: Session, url: str) -> Dict[str, Any] | None:
             return out if isinstance(out, dict) else {"result": out}
 
     raise RuntimeError("No compatible ingest function found in src.services.ingest")
+    

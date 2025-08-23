@@ -118,7 +118,11 @@ def search_catalog(
     with_rag: bool = Query(False, description="Return short 'fit_reason' from top chunks"),
     with_snippets: bool = Query(False, description="Include a short summary snippet"),
     rerank_mode: schemas.RerankMode = Query(settings.RERANK_DEFAULT.value, alias="rerank", description="none|llm"),
-    include_pending: bool = Query(False, description="Include entities that are not yet registered with Gateway (dev/debug)"),
+#    include_pending: bool = Query(False, description="Include entities that are not yet registered with Gateway (dev/debug)"),
+    include_pending: bool = Query(
+        settings.SEARCH_INCLUDE_PENDING_DEFAULT,
+        description="Include entities that are not yet registered with Gateway (dev/debug)",
+    ),
     db: Session = Depends(get_db),
 ) -> schemas.SearchResponse:
     filters = _parse_filters(type, capabilities, frameworks, providers)

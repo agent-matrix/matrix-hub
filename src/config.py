@@ -156,6 +156,14 @@ class Settings(BaseSettings):
     )
     CACHE_TTL_SECONDS: int = 4 * 60 * 60  # 4 hours
 
+    SEARCH_INCLUDE_PENDING_DEFAULT: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "SEARCH_INCLUDE_PENDING_DEFAULT",
+            "search_include_pending_default",
+        ),
+    )
+
     # ---- Ingest / Index ----
     CATALOG_REMOTES: Union[List[str], str] = Field(
         default_factory=list,
