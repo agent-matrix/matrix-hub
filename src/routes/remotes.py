@@ -9,7 +9,6 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi import BackgroundTasks
 import uuid
 from pathlib import Path
-import time
 from pydantic import BaseModel, HttpUrl, field_validator
 from sqlalchemy.orm import Session
 
