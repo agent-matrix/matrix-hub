@@ -84,15 +84,15 @@ say "→ total=${C_BOLD}${t1}${C_RESET}"
 echo
 
 # --- Primary check aligned with CLI defaults ---
-hr; say "▶ ${C_CYAN}Search (CLI-like)${C_RESET} q='Hello World' type=mcp_server mode=keyword include_pending=true limit=5"
+hr; say "▶ ${C_CYAN}Search (CLI-like)${C_RESET} q='Slack' type=mcp_server mode=keyword include_pending=true limit=5"
 curl_i "${BASE}/catalog/search" --get \
-  --data-urlencode "q=Hello World" \
+  --data-urlencode "q=Slack" \
   --data-urlencode "type=mcp_server" \
   --data-urlencode "mode=keyword" \
   --data-urlencode "include_pending=true" \
   --data-urlencode "limit=5"
 t2="$(parse_total "${BASE}/catalog/search" --get \
-  --data-urlencode "q=Hello World" \
+  --data-urlencode "q=Slack" \
   --data-urlencode "type=mcp_server" \
   --data-urlencode "mode=keyword" \
   --data-urlencode "include_pending=true" \
