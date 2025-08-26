@@ -1,0 +1,29 @@
+{
+  "name": "watsonx-agent",
+  "version": "0.1.0",
+  "description": "Watsonx Chat Agent (MCP over SSE)",
+  "transport": { "type": "sse", "endpoint": "/sse" },
+  "sse": { "endpoint": "/sse" },
+  "endpoint": "/sse",
+  "health": { "path": "/health" },
+  "entry": {
+    "type": "process",
+    "command": ["python", "server.py"]
+  },
+  "start": {
+    "cmd": ["python", "server.py"]
+  },
+  "env": {
+    "PORT": "${port}",
+    "WATSONX_AGENT_PORT": "${port}",
+    "WATSONX_API_KEY": "${WATSONX_API_KEY}",
+    "WATSONX_URL": "${WATSONX_URL}",
+    "WATSONX_PROJECT_ID": "${WATSONX_PROJECT_ID}",
+    "MODEL_ID": "${MODEL_ID}"
+  },
+  "runtime": {
+    "venv": ".venv",
+    "requirements": "requirements.txt",
+    "python": ">=3.11"
+  }
+}
