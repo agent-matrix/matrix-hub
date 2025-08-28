@@ -106,3 +106,8 @@ matrix mcp probe --url [http://127.0.0.1:54047/sse](http://127.0.0.1:54047/sse)
 ```
 
 matrix mcp call chat --alias watsonx-agent --args '{"query":"hello"}'
+
+```
+
+If you want `matrix doctor` (or the “Health” link printed by `matrix run`) to return **200 OK**, you can add a small `/health` route in `server.py` later, but it’s optional — the server will still run and MCP probing will still work with the setup above.
+```

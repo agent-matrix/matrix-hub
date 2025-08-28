@@ -1,118 +1,145 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
-# Option B — serve repo via localhost HTTP and "ingest" a remote index.json
-# This script:
-#  1) Serves your repo locally (python -m http.server)
-#  2) Fetches examples/index.json
-#  3) Extracts manifest URLs (supports several index shapes)
-#  4) For each manifest:
-#       - loads it
-#       - forces server.url to .../sse and removes server.transport
-#       - POSTs to Matrix Hub /catalog/install (equivalent to ingest+install)
-#
-# Requires: jq, curl, python
+# Serve the repo and POST each manifest in examples/index.json (or local_index.json)
+# to Matrix Hub's /catalog/install. Minimal and maintainable.
 
-HUB_URL="${HUB_URL:-http://127.0.0.1:443}"
-SERVE_DIR="${SERVE_DIR:-.}"                 # repo root that contains /examples/...
-PORT="${PORT:-8000}"
-INDEX_PATH_REL="${INDEX_PATH_REL:-examples/index.json}"
-INDEX_URL="http://127.0.0.1:${PORT}/${INDEX_PATH_REL}"
-TARGET_DIR="${TARGET_DIR:-./}"
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
+REPO_ROOT="${REPO_ROOT:-"$(cd "$SCRIPT_DIR/.." && pwd)"}"
 
-command -v jq >/dev/null 2>&1 || { echo "✖ jq is required"; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "✖ curl is required"; exit 1; }
-command -v python >/dev/null 2>&1 || { echo "✖ python is required"; exit 1; }
-
-# 1) Start a simple static server in background
-echo "▶️ Serving ${SERVE_DIR} at http://127.0.0.1:${PORT}/"
-pushd "$SERVE_DIR" >/dev/null
-python -m http.server "$PORT" >/dev/null 2>&1 &
-SERVER_PID=$!
-popd >/dev/null
-
-cleanup() {
-  echo "⏹ Stopping local server (pid $SERVER_PID)"
-  kill "$SERVER_PID" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-# 2) Wait for server & index to be reachable
-for i in {1..40}; do
-  if curl -fsS -o /dev/null "$INDEX_URL"; then
-    echo "✔ Found index at $INDEX_URL"
-    break
-  fi
-  echo "… waiting for server ($i/40)"
-  sleep 0.25
-done
-
-# 3) Fetch index JSON
-INDEX_JSON="$(curl -fsSL "$INDEX_URL")" || { echo "✖ Could not fetch $INDEX_URL"; exit 1; }
-
-# 4) Extract manifest URLs (supports multiple layouts)
-readarray -t RAW_MANIFESTS < <(jq -r '
-  if (.manifests|type=="array") then .manifests[]
-  elif (.items|type=="array") then .items[].manifest_url
-  elif (.entries|type=="array") then (.entries[] | "\(.base_url)\(.path)")
-  else empty end
-' <<< "$INDEX_JSON")
-
-if (( ${#RAW_MANIFESTS[@]} == 0 )); then
-  echo "✖ No manifest URLs found in $INDEX_URL"
-  exit 1
+# --- env (optional) ---
+if [[ -z "${ENV_FILE:-}" ]]; then
+  CANDIDATE="$REPO_ROOT/.env"
+  [[ -f "$CANDIDATE" ]] && ENV_FILE="$CANDIDATE"
+fi
+if [[ -n "${ENV_FILE:-}" && -f "$ENV_FILE" ]]; then
+  echo "ℹ️  Loading .env from $ENV_FILE"
+  set +u; set -a; source "$ENV_FILE"; set +a; set -u
 fi
 
-echo "🔎 Found ${#RAW_MANIFESTS[@]} manifest(s) in index"
+# --- Config ---
+HUB_URL="${HUB_URL:-${MATRIX_HUB_URL:-http://127.0.0.1:443}}"; HUB_URL="${HUB_URL%/}"
+HUB_TOKEN="${HUB_TOKEN:-${MATRIX_HUB_TOKEN:-}}"
+SERVE_DIR="${SERVE_DIR:-$REPO_ROOT}"
+SERVE_HOST="${SERVE_HOST:-127.0.0.1}"
+SERVE_PORT="${SERVE_PORT:-8000}"
+INDEX_PATH_REL="${INDEX_PATH_REL:-examples/index.json}"
+[[ ! -f "$SERVE_DIR/${INDEX_PATH_REL#/}" && -f "$SERVE_DIR/examples/local_index.json" ]] && INDEX_PATH_REL="examples/local_index.json"
+INDEX_PATH_REL="${INDEX_PATH_REL#/}"
+INDEX_URL="http://${SERVE_HOST}:${SERVE_PORT}/${INDEX_PATH_REL}"
+TARGET_DIR="${TARGET_DIR:-./}"
 
-# Helper: resolve relative URLs against the index URL
-resolve_url() {
-  python - "$INDEX_URL" "$1" <<'PY'
-import sys
-from urllib.parse import urljoin
-print(urljoin(sys.argv[1], sys.argv[2]))
+need(){ command -v "$1" >/dev/null 2>&1 || { echo "✖ $1 is required"; exit 1; }; }
+need jq; need curl; need python
+
+norm_auth(){ local t="${1:-}"; [[ -z "$t" ]] && { echo ""; return; }; [[ "$t" =~ ^([Bb]earer|[Bb]asic)\  ]] && echo "$t" || echo "Bearer $t"; }
+
+port_in_use(){ python - "$SERVE_HOST" "$1" <<'PY'
+import socket, sys
+h, p = sys.argv[1], int(sys.argv[2])
+s= socket.socket(); s.settimeout(0.3)
+try:
+  s.connect((h,p)); print('1')
+except Exception:
+  print('0')
+finally:
+  s.close()
 PY
 }
 
-# 5) Process each manifest
-for RAW in "${RAW_MANIFESTS[@]}"; do
-  MURL="$(resolve_url "$RAW")"
-  echo "▶️ Fetching manifest: $MURL"
+# Pick a free port quickly (8000..8020)
+if [[ "$(port_in_use "$SERVE_PORT")" == "1" ]]; then
+  for p in $(seq 8000 8020); do
+    if [[ "$(port_in_use "$p")" == "0" ]]; then SERVE_PORT="$p"; break; fi
+  done
+  INDEX_URL="http://${SERVE_HOST}:${SERVE_PORT}/${INDEX_PATH_REL}"
+fi
 
-  MANIFEST="$(curl -fsSL "$MURL")" || { echo "✖ Failed to fetch manifest $MURL"; continue; }
-
-  # Compute ENTITY_UID and SSE URL
-  ENTITY_UID="$(jq -r '"\(.type):\(.id)@\(.version)"' <<<"$MANIFEST")"
-  BASE_URL="$(jq -r '.mcp_registration.server.url // empty' <<<"$MANIFEST")"
-  if [[ -z "$BASE_URL" ]]; then
-    echo "⚠️ Skipping (no server.url): $MURL"
-    continue
+# Hub TLS autodetect on :443
+HUB_CURL_OPTS=()
+if [[ "$HUB_URL" =~ ^https?://127\.0\.0\.1:443$ ]]; then
+  if curl -k -sS -I --max-time 2 "https://127.0.0.1:443/health" >/dev/null 2>&1; then
+    HUB_URL="https://127.0.0.1:443"; HUB_CURL_OPTS=(-k)
+  else
+    HUB_URL="http://127.0.0.1:443"
   fi
-  BASE_URL="${BASE_URL%/}"
-  SSE_URL="${BASE_URL}/sse"
+fi
+[[ "$HUB_URL" == https:* ]] && HUB_CURL_OPTS=(-k)
+[[ -n "${HUB_TOKEN:-}" ]] && HUB_AUTH=(-H "Authorization: $(norm_auth "$HUB_TOKEN")") || HUB_AUTH=()
 
-  # Optional: preflight SSE (non-fatal for SSE streams)
-  echo "   ⏱ Preflight SSE: $SSE_URL"
-  curl -sS -N --max-time 2 -D- -o /dev/null "$SSE_URL" >/dev/null 2>&1 || true
+# Index must exist on disk
+[[ -f "$SERVE_DIR/${INDEX_PATH_REL#/}" ]] || { echo "✖ Missing index: $SERVE_DIR/${INDEX_PATH_REL#/}"; exit 1; }
 
-  # Patch: set url=.../sse and remove transport to avoid /messages/ rewrite
-  PATCHED="$(jq --arg url "$SSE_URL" '
-     . as $root
-     | ($root
-        | .mcp_registration.server.url = $url
-        | if .mcp_registration.server.transport then del(.mcp_registration.server.transport) else . end
-       )
-  ' <<<"$MANIFEST")"
+# Start static server
+pushd "$SERVE_DIR" >/dev/null
+python -m http.server "$SERVE_PORT" --bind "$SERVE_HOST" >/dev/null 2>&1 &
+SERVER_PID=$!
+popd >/dev/null
+trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
 
-  echo "   📦 Installing $ENTITY_UID via $HUB_URL/catalog/install"
-  curl -sS -X POST "$HUB_URL/catalog/install" \
-    -H "Content-Type: application/json" \
-    -d "$(jq -nc \
-          --arg id "$ENTITY_UID" \
-          --arg target "$TARGET_DIR" \
-          --argjson manifest "$PATCHED" \
-          '{id:$id, target:$target, manifest:$manifest}')" \
-    | jq -r 'if .results then "   ✅ install ok" else . end'
+echo "▶️  Serving $SERVE_DIR at http://$SERVE_HOST:$SERVE_PORT/"
+
+# Wait index
+for i in {1..60}; do
+  code="$(curl -sS -w '%{http_code}' -o /dev/null "$INDEX_URL" || true)"
+  [[ "$code" =~ ^2..$ ]] && { echo "✔ Index ready ($INDEX_URL)"; break; }
+  (( i==60 )) && { echo "✖ Index not reachable ($INDEX_URL)"; exit 1; }
+  sleep 0.25
 done
 
-echo "✅ All manifests processed."
+INDEX_JSON="$(curl -fsSL "$INDEX_URL")"
+
+# Extract manifest refs (relative OK)
+mapfile -t MANIFESTS < <(jq -r '
+  if (.manifests|type=="array") then .manifests[]
+  elif (.items|type=="array") then .items[].manifest_url
+  elif (.entries|type=="array") then (.entries[] | ( (.base_url//"") + (.path//"") ))
+  else empty end' <<<"$INDEX_JSON")
+[[ ${#MANIFESTS[@]} -gt 0 ]] || { echo "✖ No manifest refs in index"; exit 1; }
+
+# Resolve and process each manifest
+resolve(){ python - "$INDEX_URL" "$1" <<'PY'
+import sys
+from urllib.parse import urlparse, urljoin
+base, ref = sys.argv[1].strip(), sys.argv[2].strip()
+if not ref or ref == 'null':
+  print(''); raise SystemExit
+if ref.startswith(('http://','https://')):
+  print(ref); raise SystemExit
+p = urlparse(base); root = f"{p.scheme}://{p.netloc}/"
+print(urljoin(root, ref.lstrip('/')))
+PY
+}
+
+for RAW in "${MANIFESTS[@]}"; do
+  MURL="$(resolve "$RAW")"; [[ -z "$MURL" ]] && { echo "• skip blank ref"; continue; }
+  # If the ref targets localhost with a different port, rewrite to our effective port
+  MURL="$(python - "$MURL" "$SERVE_HOST" "$SERVE_PORT" <<'PY'
+import sys
+from urllib.parse import urlparse, urlunparse
+u, host, port = sys.argv[1], sys.argv[2], sys.argv[3]
+p = urlparse(u)
+if p.hostname in {host,'127.0.0.1','localhost','0.0.0.0'} and (p.port and str(p.port)!=port):
+  p = p._replace(scheme='http', netloc=f"{host}:{port}")
+print(urlunparse(p))
+PY
+)"
+
+  echo "▶️  Fetch $MURL"
+  MANIFEST="$(curl -fsSL "$MURL" || true)"; [[ -z "$MANIFEST" ]] && { echo "   ✖ fetch failed"; continue; }
+
+  BASE="$(jq -r '.mcp_registration.server.url // empty' <<<"$MANIFEST")"; [[ -z "$BASE" ]] && { echo "   ⚠ no server.url"; continue; }
+  BASE="${BASE%/}"; SSE="${BASE}/sse"
+
+  PATCHED="$(jq --arg url "$SSE" '.mcp_registration.server.url=$url | del(.mcp_registration.server.transport)' <<<"$MANIFEST")"
+
+  # Use a non-reserved variable name (avoid UID)
+  ENTITY_UID="$(jq -r '"\(.type):\(.id)@\(.version)"' <<<"$MANIFEST")"
+  echo "   📦 Install $ENTITY_UID → $HUB_URL/catalog/install"
+  code="$(curl -sS -w '%{http_code}' -o /dev/null "$HUB_URL/catalog/install" \
+     "${HUB_CURL_OPTS[@]}" "${HUB_AUTH[@]}" -H 'Content-Type: application/json' \
+     -d "$(jq -nc --arg id "$ENTITY_UID" --arg target "$TARGET_DIR" --argjson manifest "$PATCHED" '{id:$id,target:$target,manifest:$manifest}')" || true)"
+  [[ "$code" =~ ^2..$ ]] && echo "   ✅ ok (HTTP $code)" || echo "   ✖ failed (HTTP $code)"
+done
+
+echo "✅ Done."

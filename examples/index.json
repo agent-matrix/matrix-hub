@@ -1,5 +1,5 @@
 {
   "manifests": [
-    "http://127.0.0.1:8000/examples/manifests/watsonx.manifest.json"
+    "examples/manifests/watsonx.manifest.json"
   ]
 }
