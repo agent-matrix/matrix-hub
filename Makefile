@@ -10,28 +10,29 @@
 SHELL := /bin/sh
 
 # System & Environment
-BRIGHT_GREEN  := $(shell tput -T screen setaf 10)
-DIM_GREEN     := $(shell tput -T screen setaf 2)
-RESET         := $(shell tput -T screen sgr0)
+BRIGHT_GREEN    := $(shell tput -T screen setaf 10)
+DIM_GREEN       := $(shell tput -T screen setaf 2)
+RESET           := $(shell tput -T screen sgr0)
 
 # Configurable Constants
-PY              ?= python3
-VENV_DIR        ?= .venv
-UVICORN         ?= uvicorn
-APP             ?= src.app:app
-HOST            ?= 0.0.0.0
-PORT            ?= 443
+PY                ?= python3
+VENV_DIR          ?= .venv
+UVICORN           ?= uvicorn
+APP               ?= src.app:app
+HOST              ?= 0.0.0.0
+# Changed port to 8000 to avoid needing sudo for development
+PORT              ?= 8000
 
-RUFF            ?= ruff
-PYTEST          ?= pytest
-ALEMBIC         ?= alembic
-ALEMBIC_INI     ?= alembic.ini
-MKDOCS          ?= mkdocs
-ENV_FILE        ?= .env
+RUFF              ?= ruff
+PYTEST            ?= pytest
+ALEMBIC           ?= alembic
+ALEMBIC_INI       ?= alembic.ini
+MKDOCS            ?= mkdocs
+ENV_FILE          ?= .env
 
 # Scripts & Operators
-BASH            ?= bash
-SCRIPTS_DIR     ?= scripts
+BASH              ?= bash
+SCRIPTS_DIR       ?= scripts
 
 # MCP Gateway
 GATEWAY_PROJECT_DIR ?= mcpgateway
@@ -72,7 +73,7 @@ help:
 	@echo "$(BRIGHT_GREEN)Core Operations$(RESET)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "setup" "🔌 Jack in & load programs (create .venv, install deps)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "dev" "😎 Operator mode (run API with live reload)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run" "▶️ Execute main program (run API in foreground)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run" "▶️ Execute main program (run API in production mode)"
 	@echo
 	@echo "$(BRIGHT_GREEN)Index Management$(RESET)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "index-init" "🌱 Create an empty index construct"
@@ -124,21 +125,11 @@ setup: $(VENV_DIR)/installed
 .PHONY: dev
 dev: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Entering Operator Mode... live reload enabled.$(RESET)"
-	@$(ENV) \
-	. $(VENV_DIR)/bin/activate && \
-	$(UVICORN) $(APP) --reload --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
+	@$(BASH) $(SCRIPTS_DIR)/run_dev.sh
 
 .PHONY: run
 run: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Executing main program...$(RESET)"
-	@$(ENV) \
-	$(activate) && \
-	$(UVICORN) $(APP) --host $${HOST:-$(HOST)} --port $${PORT:-$(PORT)} --proxy-headers
-
-.PHONY: dev-sh prod-sh
-dev-sh:
-	@$(BASH) $(SCRIPTS_DIR)/run_dev.sh
-prod-sh:
 	@$(BASH) $(SCRIPTS_DIR)/run_prod.sh
 
 # Documentation Archives
@@ -230,26 +221,26 @@ serve-index:
 
 # Residual Self-Image (Container)
 # Build-time variables
-IMAGE_NAME           ?= matrix-hub
-IMAGE_TAG            ?= latest
-HUB_INSTALL_TARGET   ?= prod
-SKIP_GATEWAY_SETUP   ?= 0
-PLATFORM             ?=
-NO_CACHE             ?= 0
-PULL                 ?= 0
-BUILDX               ?= 0
+IMAGE_NAME            ?= matrix-hub
+IMAGE_TAG             ?= latest
+HUB_INSTALL_TARGET    ?= prod
+SKIP_GATEWAY_SETUP    ?= 0
+PLATFORM              ?=
+NO_CACHE              ?= 0
+PULL                  ?= 0
+BUILDX                ?= 0
 # Run-time variables
-CONTAINER_NAME       ?= matrix-hub
-APP_HOST_PORT        ?= 443
-GW_HOST_PORT         ?= 4444
-DATA_VOLUME          ?= matrixhub_data
-GW_VOLUME            ?=
-NETWORK_NAME         ?=
-RESTART_POLICY       ?= unless-stopped
-DETACH               ?= 1
-PULL_RUNTIME         ?= 0
-REPLACE              ?= 1
-GW_SKIP              ?= 0
+CONTAINER_NAME        ?= matrix-hub
+APP_HOST_PORT         ?= 443
+GW_HOST_PORT          ?= 4444
+DATA_VOLUME           ?= matrixhub_data
+GW_VOLUME             ?=
+NETWORK_NAME          ?=
+RESTART_POLICY        ?= unless-stopped
+DETACH                ?= 1
+PULL_RUNTIME          ?= 0
+REPLACE               ?= 1
+GW_SKIP               ?= 0
 
 .PHONY: container-build
 container-build:
