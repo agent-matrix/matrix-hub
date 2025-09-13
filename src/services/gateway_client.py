@@ -10,9 +10,11 @@ This client wraps the HTTP endpoints exposed by the mcpgateway service:
   - POST /resources  → register Resource definitions
   - POST /prompts    → register Prompt templates
   - GET  /tools, /servers, /resources, /prompts → list existing entities
+  - POST /a2a        → register A2A agents  (NEW)
 
 Key behaviors:
-  * Auth: Bearer JWT minted just-in-time via get_mcp_admin_token().
+  * Auth: Bearer JWT minted just-in-time via get_mcp_admin_token()
+          or caller-supplied token override (non-breaking, optional).
   * Retries: automatically retries transient failures (5xx or network errors).
   * Idempotency: callers can set idempotent=True to treat 409 (Conflict) as success.
 
@@ -27,7 +29,7 @@ import json
 import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional, Union, TYPE_CHECKING
-from concurrent.futures import ThreadPoolExecutor, as_completed  # NEW
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 from pathlib import Path
@@ -67,9 +69,11 @@ class GatewayClientError(RuntimeError):
             f"body={self.body!r}>"
         )
 
+
 class InstallError(Exception):
     """Raised when an installation or registration step is invalid or cannot proceed."""
     pass
+
 
 # --------------------------------------------------------------------------------------
 # Core client
@@ -110,7 +114,7 @@ class MCPGatewayClient:
             "Content-Type": "application/json",
         }
 
-        # NEW: persistent HTTP client with HTTP/2 and connection pooling
+        # persistent HTTP client with HTTP/2 and connection pooling
         limits = httpx.Limits(
             max_connections=int(getattr(settings, "GATEWAY_HTTP_MAX_CONNECTIONS", 20)),
             max_keepalive_connections=int(getattr(settings, "GATEWAY_HTTP_MAX_KEEPALIVE", 10)),
@@ -133,29 +137,69 @@ class MCPGatewayClient:
     # Public convenience APIs
     # -----------------------
 
-    def create_tool(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def create_tool(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """POST /tools with ToolCreate payload."""
-        return self._post_json("/tools", payload, ok_on_conflict=idempotent)
+        return self._post_json("/tools", payload, ok_on_conflict=idempotent, override_token=override_token)
 
-    def create_server(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def create_server(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         POST /servers with ServerCreate payload.
-        This method normalizes the incoming payload to match the gateway's expected schema.
+        This method accepts either a flattened or manifest-shaped server payload.
         """
-        # This normalization step is now handled by the register_server orchestrator
-        return self._post_json("/servers", payload, ok_on_conflict=idempotent)
+        return self._post_json("/servers", payload, ok_on_conflict=idempotent, override_token=override_token)
 
-    def create_resource(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def create_resource(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """POST /resources with ResourceCreate payload."""
-        return self._post_json("/resources", payload, ok_on_conflict=idempotent)
+        return self._post_json("/resources", payload, ok_on_conflict=idempotent, override_token=override_token)
 
-    def create_prompt(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def create_prompt(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """POST /prompts with PromptCreate payload."""
-        return self._post_json("/prompts", payload, ok_on_conflict=idempotent)
+        return self._post_json("/prompts", payload, ok_on_conflict=idempotent, override_token=override_token)
 
-    def create_gateway(self, payload: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
+    def create_gateway(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """POST /gateways with GatewayCreate payload."""
-        return self._post_json("/gateways", payload, ok_on_conflict=idempotent)
+        return self._post_json("/gateways", payload, ok_on_conflict=idempotent, override_token=override_token)
+
+    # --------- NEW: A2A agent registration ---------
+    def create_a2a_agent(
+        self,
+        payload: Dict[str, Any],
+        *,
+        idempotent: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """POST /a2a with A2A agent registration payload."""
+        return self._post_json("/a2a", payload, ok_on_conflict=idempotent, override_token=override_token)
 
     def list_servers(self) -> List[Dict[str, Any]]:
         """GET /servers to list all registered servers."""
@@ -186,6 +230,7 @@ class MCPGatewayClient:
         json_body: Optional[Dict[str, Any]] = None,
         params: Optional[Dict[str, Any]] = None,
         ok_on_conflict: bool = False,
+        override_token: Optional[str] = None,
     ) -> httpx.Response:
         """Core HTTP logic with auth, retries, and error handling."""
         url = f"{self.base_url}{path}"
@@ -194,12 +239,16 @@ class MCPGatewayClient:
 
         for attempt in range(1, attempts + 1):
             try:
-                token = get_mcp_admin_token(
-                    secret=self.jwt_secret,
-                    username=self.jwt_username,
-                    ttl_seconds=300,
-                    fallback_token=self.fallback_token,
-                )
+                # allow caller to override the Authorization value with a pre-minted token
+                if override_token:
+                    token = override_token
+                else:
+                    token = get_mcp_admin_token(
+                        secret=self.jwt_secret,
+                        username=self.jwt_username,
+                        ttl_seconds=300,
+                        fallback_token=self.fallback_token,
+                    )
             except Exception as exc:
                 raise GatewayClientError(f"Auth token error: {exc}")
 
@@ -261,12 +310,31 @@ class MCPGatewayClient:
 
         raise GatewayClientError(str(last_exc) if last_exc else "Unknown gateway request error")
 
-    def _get_json(self, path: str, *, params: Optional[Dict[str, Any]] = None) -> Any:
-        resp = self._request("GET", path, params=params)
+    def _get_json(
+        self,
+        path: str,
+        *,
+        params: Optional[Dict[str, Any]] = None,
+        override_token: Optional[str] = None,
+    ) -> Any:
+        resp = self._request("GET", path, params=params, override_token=override_token)
         return self._safe_json(resp)
 
-    def _post_json(self, path: str, body: Dict[str, Any], *, ok_on_conflict: bool = False) -> Dict[str, Any]:
-        resp = self._request("POST", path, json_body=body, ok_on_conflict=ok_on_conflict)
+    def _post_json(
+        self,
+        path: str,
+        body: Dict[str, Any],
+        *,
+        ok_on_conflict: bool = False,
+        override_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        resp = self._request(
+            "POST",
+            path,
+            json_body=body,
+            ok_on_conflict=ok_on_conflict,
+            override_token=override_token,
+        )
         return self._safe_json(resp)
 
     def _safe_json(self, resp: httpx.Response) -> Any:
@@ -291,6 +359,7 @@ def _client() -> MCPGatewayClient:
     if _client_singleton is None:
         _client_singleton = MCPGatewayClient()
     return _client_singleton
+
 
 def register_tool(tool_spec: Dict[str, Any], *, idempotent: bool = False) -> Dict[str, Any]:
     """Compatibility wrapper for install.py → registers a Tool."""
@@ -505,3 +574,47 @@ def trigger_discovery(server_id_or_response: Union[str, Dict[str, Any]]) -> Dict
 def gateway_health() -> Dict[str, Any]:
     """Convenience wrapper to probe the gateway health/ready endpoint."""
     return _client().health()
+
+
+# --------------------------------------------------------------------------------------
+# NEW: A2A helpers (non-breaking additions)
+# --------------------------------------------------------------------------------------
+
+def register_a2a_agent(
+    agent_spec: Dict[str, Any],
+    *,
+    idempotent: bool = False,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Register an A2A agent with the Gateway (POST /a2a).
+
+    Args:
+        agent_spec: {"name": str, "endpoint_url": str, "agent_type": "jsonrpc"|"custom",
+                     "auth_type": "none"|"bearer"|"api_key", "auth_value": str|None, "tags": [str], ...}
+        idempotent: treat HTTP 409 as success
+        token: optional override Authorization value. If not provided, a JWT is minted via settings.
+    """
+    logger.info("Registering A2A agent with MCP-Gateway (idempotent=%s)", idempotent)
+    return _client().create_a2a_agent(agent_spec, idempotent=idempotent, override_token=token)
+
+
+def create_server_with_a2a(
+    server_payload: Dict[str, Any],
+    *,
+    idempotent: bool = False,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Create a virtual server that references one or more A2A agents (POST /servers).
+
+    `server_payload` typically includes:
+      {
+        "name": "...",
+        "description": "...",
+        "associated_a2a_agents": ["agent-name-or-id", ...],
+        # plus optional associated tools/resources/prompts if desired
+      }
+    """
+    logger.info("Creating server for A2A in MCP-Gateway (idempotent=%s)", idempotent)
+    return _client().create_server(server_payload, idempotent=idempotent, override_token=token)

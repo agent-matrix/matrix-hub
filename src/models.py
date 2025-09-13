@@ -4,15 +4,17 @@ SQLAlchemy models for Matrix Hub.
 - Minimal, portable schema that works on SQLite and Postgres
 - pg_trgm / pgvector indexes are created via Alembic migrations
 - Timestamps and simple __repr__ implementations
+- A2A-ready: adds `protocols`, `manifests`, and new `EntityRegistration` table model
+  without breaking existing production columns or behavior.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from sqlalchemy import (
-    Column, 
+    Column,
     String,
     Text,
     Float,
@@ -26,18 +28,20 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Try to use pgvector type when available; fall back to JSON (portable).
-try:
+try:  # pragma: no cover - optional dependency
     # pip install pgvector
     from pgvector.sqlalchemy import Vector  # type: ignore
+
     VECTOR_COLUMN_TYPE = Vector(768)
-except Exception:  # pragma: no cover - fallback for dev envs without pgvector
+except Exception:  # pragma: no cover - fallback for dev/test envs without pgvector
     VECTOR_COLUMN_TYPE = JSON  # stores list[float] as JSON for portability
 
 
 class Base(DeclarativeBase):
     """Declarative base for the Hub models."""
 
-    repr_cols_num = 4  # pragma: no cover (used in __repr__)
+    # Limit columns printed in repr for tidy logs/tests
+    repr_cols_num = 4  # pragma: no cover (used in __repr__ only)
 
     def __repr__(self) -> str:  # compact, noise-free repr for logs/tests
         values = []
@@ -55,6 +59,7 @@ class Entity(Base):
       On Postgres you can still index with GIN in migrations if needed.
     - Trigram (pg_trgm) index on concatenated (name/summary/description) is
       created in Alembic migrations for Postgres.
+    - Non-breaking A2A support: adds `protocols` and `manifests` columns.
     """
 
     __tablename__ = "entity"
@@ -63,7 +68,7 @@ class Entity(Base):
     type: Mapped[str] = mapped_column(
         String,
         nullable=False,
-        doc="One of: 'agent' | 'tool' | 'mcp_server'"
+        doc="One of: 'agent' | 'tool' | 'mcp_server'",
     )
     name: Mapped[str] = mapped_column(String, nullable=False)
     version: Mapped[str] = mapped_column(String, nullable=False)
@@ -75,13 +80,8 @@ class Entity(Base):
     homepage: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     source_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # **NEW**: record any gateway.register failure message here
-    #gateway_error: Mapped[Optional[str]] = mapped_column(
-    #    String, nullable=True, default=None, comment="Error text from gateway.register"
-    #)
-    # record any gateway.register failure message here
+    # record any gateway.register failure message here (kept for backward-compat)
     gateway_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
-
 
     tenant_id: Mapped[str] = mapped_column(String, nullable=False, default="public")
 
@@ -89,6 +89,12 @@ class Entity(Base):
     capabilities: Mapped[List[str]] = mapped_column(JSON, default=list)
     frameworks: Mapped[List[str]] = mapped_column(JSON, default=list)
     providers: Mapped[List[str]] = mapped_column(JSON, default=list)
+
+    # NEW (non-breaking): protocol markers and protocol-native manifests
+    # - protocols: e.g. ["a2a@1.0", "mcp@0.1"] for fast filtering
+    # - manifests: arbitrary per-protocol blob (e.g. manifests["a2a"], manifests["mcp"], ...)
+    protocols: Mapped[List[str]] = mapped_column(JSON, nullable=False, default=list)
+    manifests: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
     readme_blob_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
@@ -112,6 +118,8 @@ class Entity(Base):
         Index("ix_entity_type_name", "type", "name"),
         Index("ix_entity_created_at", "created_at"),
     )
+
+    # Legacy MCP fields retained for compatibility with existing production flows
     gateway_registered_at = Column(DateTime(timezone=True), nullable=True)
     mcp_registration: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
@@ -130,7 +138,7 @@ class EmbeddingChunk(Base):
     entity_uid: Mapped[str] = mapped_column(
         String,
         ForeignKey("entity.uid", ondelete="CASCADE"),
-        primary_key=True
+        primary_key=True,
     )
     chunk_id: Mapped[str] = mapped_column(String, primary_key=True)
 
@@ -161,4 +169,28 @@ class Remote(Base):
     """
 
     __tablename__ = "remote"
+
     url: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+
+
+# NEW (non-breaking): track protocol registration per target (e.g., MCP Gateway)
+class EntityRegistration(Base):
+    """Per-protocol registration state for an entity to a given target.
+
+    Primary key: (entity_uid, protocol, target)
+    Example: ("agent:foo@1.0.0", "a2a", "mcpgateway@prod")
+    """
+
+    __tablename__ = "entity_registration"
+
+    entity_uid: Mapped[str] = mapped_column(String, ForeignKey("entity.uid", ondelete="CASCADE"), primary_key=True)
+    protocol: Mapped[str] = mapped_column(String, primary_key=True)
+    target: Mapped[str] = mapped_column(String, primary_key=True, default="")
+
+    status: Mapped[str] = mapped_column(String, default="unknown")
+    registered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    # Helpful index for dashboards/queries is created via Alembic migration:
+    # Index('idx_entity_registration_protocol', 'protocol')

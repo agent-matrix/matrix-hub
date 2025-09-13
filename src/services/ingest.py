@@ -14,6 +14,11 @@ The shape of `index.json` can vary; we support a few simple forms:
 
 Validation is delegated to services.validate (if available). If validation fails,
 we log and skip the item rather than abort the entire ingest.
+
+NEW (non-breaking, A2A-ready):
+- If a manifest contains `manifests.a2a`, we persist it to `entity.manifests["a2a"]`
+  and tag `entity.protocols += ["a2a@<version>"]` when the columns exist.
+  (Guards ensure older DBs without these columns continue to ingest safely.)
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
-from concurrent.futures import ThreadPoolExecutor, as_completed  # <-- added
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import httpx
 import yaml
@@ -36,7 +41,7 @@ from ..db import session_scope
 
 # Search & embedding utilities
 from .search.chunking import split_text  # type: ignore
-from .search.backends import embedder, vector, blobstore  # type_ignore
+from .search.backends import embedder, vector, blobstore  # type: ignore
 from ..db import save_entity
 
 log = logging.getLogger("ingest")
@@ -180,11 +185,40 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
 
             # 1) Save the raw manifest as an Entity row (idempotent upsert)
             entity = save_entity(manifest, db)
-            # --- persist registration for later sync ---
+
+            # --- persist protocol-native manifests (+ A2A tag) and registration (non-breaking) ---
+            try:
+                mani = manifest.get("manifests") or {}
+                if isinstance(mani, dict) and mani:
+                    # store entire 'manifests' block when column exists
+                    try:
+                        entity.manifests = mani  # type: ignore[attr-defined]
+                    except Exception:
+                        # Column may not exist yet (older deployments); ignore safely
+                        pass
+
+                    a2a = mani.get("a2a")
+                    if isinstance(a2a, dict):
+                        ver = str(a2a.get("version") or "1.0").strip()
+                        tag = f"a2a@{ver}"
+                        try:
+                            current = list(getattr(entity, "protocols", []) or [])  # type: ignore[attr-defined]
+                            if tag not in current:
+                                # Sort for stable UI; tolerate duplicates via set
+                                entity.protocols = sorted(set([*current, tag]))  # type: ignore[attr-defined]
+                        except Exception:
+                            # Column may not exist yet; ignore safely
+                            pass
+            except Exception:
+                # Never fail ingest because of optional A2A persistence
+                log.exception("ingest.a2a.persist.error", extra={"uid": getattr(entity, "uid", None)})
+
+            # --- persist MCP registration for later sync (kept as-is) ---
             if isinstance(manifest.get("mcp_registration"), dict):
-                entity.mcp_registration = manifest["mcp_registration"]
+                entity.mcp_registration = manifest["mcp_registration"]  # type: ignore[attr-defined]
+
             db.add(entity)
-            # ------------------------------------------------
+
             log.info(
                 "ingest.entity.saved",
                 extra={"uid": getattr(entity, "uid", None), "source_url": m_url},
@@ -285,14 +319,14 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
 
 def _fetch_json(url: str) -> Dict[str, Any]:
     # Enable HTTP/2 for better multiplexing with some hosts (minor perf win)
-    with httpx.Client(timeout=20.0, http2=True) as client:  # <-- http2=True
+    with httpx.Client(timeout=20.0, http2=True) as client:
         r = client.get(url)
         r.raise_for_status()
         return r.json()
 
 
 def _fetch_text(url: str) -> str:
-    with httpx.Client(timeout=20.0, http2=True) as client:  # <-- http2=True
+    with httpx.Client(timeout=20.0, http2=True) as client:
         r = client.get(url)
         r.raise_for_status()
         return r.text
@@ -358,7 +392,7 @@ def _maybe_validate(manifest: Dict[str, Any], source: str) -> Dict[str, Any]:
     but don't hard-fail if validation isn't wired yet.
     """
     try:
-        from .validate import validate_manifest  # type_ignore
+        from .validate import validate_manifest  # type: ignore
     except Exception:
         log.debug("Validation module not available; skipping schema validation for %s", source)
         return manifest
@@ -416,8 +450,8 @@ def _upsert_entity_from_manifest(manifest: Dict[str, Any], db: Session, source_u
     e.frameworks = list(comp.get("frameworks") or []) or e.frameworks
     e.providers = list(comp.get("providers") or []) or e.providers
 
-    # Optional release timestamp if present
-    # (leave to default otherwise)
+    # Note: Protocols/manifests are handled earlier when we have the whole manifest to inspect.
+
     db.flush()  # ensure PK is set for FK uses
     return e
 
@@ -433,11 +467,11 @@ def _build_corpus(entity: Entity, manifest: Dict[str, Any]) -> str:
     parts.append(entity.summary or "")
     parts.append(entity.description or "")
 
-    if entity.capabilities:
+    if getattr(entity, "capabilities", None):
         parts.append("Capabilities: " + ", ".join(entity.capabilities))
-    if entity.frameworks:
+    if getattr(entity, "frameworks", None):
         parts.append("Frameworks: " + ", ".join(entity.frameworks))
-    if entity.providers:
+    if getattr(entity, "providers", None):
         parts.append("Providers: " + ", ".join(entity.providers))
 
     # README can be inline or a URL
@@ -511,10 +545,10 @@ def _chunk_and_embed(entity: Entity, manifest: Dict[str, Any], db: Session) -> i
             "entity_uid": entity.uid,
             "chunk_id": str(chunk_id),
             "vector": v,
-            "caps_text": ",".join(entity.capabilities or []),
-            "frameworks_text": ",".join(entity.frameworks or []),
-            "providers_text": ",".join(entity.providers or []),
-            "quality_score": float(entity.quality_score or 0.0),
+            "caps_text": ",".join(getattr(entity, "capabilities", []) or []),
+            "frameworks_text": ",".join(getattr(entity, "frameworks", []) or []),
+            "providers_text": ",".join(getattr(entity, "providers", []) or []),
+            "quality_score": float(getattr(entity, "quality_score", 0.0) or 0.0),
             "embed_model": getattr(embedder, "model_id", "unknown"),
             "raw_ref": blob_key,
         })
@@ -531,10 +565,33 @@ def ingest_manifest(manifest: Dict[str, Any], db: Session, do_embed: bool = True
     """
     source_url = manifest.get("source_url") or manifest.get("manifest_url")
     entity = _upsert_entity_from_manifest(manifest, db=db, source_url=source_url)
-    
+
+    # Persist protocol-native manifests (+ A2A tag) when present (non-breaking guards)
+    try:
+        mani = manifest.get("manifests") or {}
+        if isinstance(mani, dict) and mani:
+            try:
+                entity.manifests = mani  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            a2a = mani.get("a2a")
+            if isinstance(a2a, dict):
+                ver = str(a2a.get("version") or "1.0").strip()
+                tag = f"a2a@{ver}"
+                try:
+                    current = list(getattr(entity, "protocols", []) or [])  # type: ignore[attr-defined]
+                    if tag not in current:
+                        entity.protocols = sorted(set([*current, tag]))  # type: ignore[attr-defined]
+                except Exception:
+                    pass
+        db.add(entity)
+        db.flush()
+    except Exception:
+        log.exception("ingest.single.a2a.persist.error", extra={"uid": getattr(entity, "uid", None)})
+
     if do_embed:
         _chunk_and_embed(entity=entity, manifest=manifest, db=db)
-    
+
     return entity
 
 

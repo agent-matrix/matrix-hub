@@ -16,6 +16,13 @@ Note on MCP-Gateway:
 - In this gateway, registering an MCP "server" is done via POST /gateways.
 - Our gateway_client.register_server(server_spec) handles that mapping and transport normalization.
 - There is no explicit discovery endpoint; trigger_discovery(...) is a no-op shim for compatibility.
+
+NEW (A2A-ready, non-breaking):
+- If the manifest contains manifests.a2a, we:
+  • persist entity.protocols += ["a2a@<version>"] and entity.manifests["a2a"] = {...}
+  • best-effort register the A2A agent via Gateway (POST /a2a)
+  • optionally create a virtual server associated to that A2A agent
+  • upsert a row in entity_registration (protocol='a2a') when available
 """
 
 from __future__ import annotations
@@ -41,8 +48,15 @@ import yaml
 from sqlalchemy.orm import Session
 
 from ..models import Entity
+# Optional: EntityRegistration may not exist in older deployments; guard import.
+try:  # pragma: no cover
+    from ..models import EntityRegistration  # type: ignore
+except Exception:  # pragma: no cover
+    EntityRegistration = None  # type: ignore
+
 from ..config import settings
 from src.db import save_entity
+
 # Optional dependencies (best-effort usage)
 try:
     from .adapters import write_adapters  # type: ignore
@@ -58,9 +72,13 @@ try:
         register_prompts,
         register_gateway,
         trigger_discovery,
+        # NEW (A2A)
+        register_a2a_agent,
+        create_server_with_a2a,
     )
 except Exception:  # pragma: no cover
     register_tool = register_server = register_resources = register_prompts = register_gateway = trigger_discovery = None  # type: ignore
+    register_a2a_agent = create_server_with_a2a = None  # type: ignore
 
 log = logging.getLogger("install")
 
@@ -302,6 +320,16 @@ def install_entity(
         log.exception("Adapter writing failed")
         results.append(StepResult(step="adapters.write", ok=False, stderr=str(e)))
 
+    # --- NEW: Best-effort A2A registration (optional, non-breaking) ---
+    try:
+        a2a_steps = _handle_a2a_registration(db, uid, manifest)
+        if a2a_steps:
+            results.extend(a2a_steps)
+    except Exception as e:  # guard against unexpected issues, keep install flowing
+        log.exception("A2A registration step failed")
+        results.append(StepResult(step="gateway.a2a_register", ok=False, stderr=str(e)))
+    # -------------------------------------------------------------------
+
     # 2) Best-effort MCP-Gateway registration (won’t abort install on error)
     try:
         reg_res = _maybe_register_gateway(manifest)
@@ -456,6 +484,15 @@ def _build_install_plan(manifest: Dict[str, Any]) -> Dict[str, Any]:
 
     if manifest.get("mcp_registration"):
         plan["mcp_registration"] = manifest["mcp_registration"]
+
+    # NEW: reflect A2A presence in plan (non-breaking, informational)
+    a2a = (manifest.get("manifests") or {}).get("a2a")
+    if isinstance(a2a, dict):
+        plan["a2a"] = {
+            "endpoint_url": a2a.get("endpoint_url"),
+            "agent_type": a2a.get("agent_type", "jsonrpc"),
+            "server": a2a.get("server", {}),
+        }
 
     return plan
 
@@ -707,6 +744,165 @@ def _maybe_register_gateway(manifest: Dict[str, Any]) -> Optional[Dict[str, Any]
 
     return results
 
+
+# --------------------------------------------------------------------------------------
+# A2A registration helpers (non-breaking)
+# --------------------------------------------------------------------------------------
+
+def _handle_a2a_registration(db: Session, uid: str, manifest: Dict[str, Any]) -> List[StepResult]:
+    """
+    If manifest.manifests.a2a exists, persist protocol + manifest on Entity and
+    best-effort register with Gateway (POST /a2a) and (optionally) create a server.
+    Writes an entity_registration row when available.
+    """
+    steps: List[StepResult] = []
+
+    a2a = (manifest.get("manifests") or {}).get("a2a")
+    if not isinstance(a2a, dict):
+        return steps  # nothing to do
+
+    ent = db.get(Entity, uid)
+    if not ent:
+        return steps
+
+    # 1) Persist protocol marker + the a2a manifest (non-breaking on DB)
+    try:
+        version = str(a2a.get("version") or "1.0")
+        proto_tag = f"a2a@{version}"
+        try:
+            # protocols is JSON list (added in new schema); handle missing gracefully
+            protos = list(getattr(ent, "protocols", []) or [])
+            if proto_tag not in protos:
+                protos.append(proto_tag)
+            setattr(ent, "protocols", protos)
+        except Exception:
+            # Column may not exist in older DBs; skip silently
+            pass
+
+        try:
+            m = dict(getattr(ent, "manifests", {}) or {})
+            m["a2a"] = a2a
+            setattr(ent, "manifests", m)
+        except Exception:
+            # Column may not exist in older DBs; skip silently
+            pass
+
+        db.add(ent)
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to persist A2A manifest/protocol to Entity[%s]", uid)
+        # non-fatal for install flow
+
+    # 2) Register A2A with Gateway (if client is available/configured)
+    if not register_a2a_agent or not getattr(settings, "MCP_GATEWAY_URL", None):
+        steps.append(StepResult(step="gateway.a2a_register", ok=True, extra={"skipped": True}))
+        return steps
+
+    endpoint = a2a.get("endpoint_url")
+    if not endpoint:
+        steps.append(StepResult(step="gateway.a2a_register", ok=False, stderr="a2a.endpoint_url missing"))
+        return steps
+
+    payload: Dict[str, Any] = {
+        "name": ent.name,  # stable, human friendly
+        "endpoint_url": endpoint,
+        "agent_type": a2a.get("agent_type", "jsonrpc"),
+        "auth_type": (a2a.get("auth") or {}).get("type", "none"),
+        "auth_value": (a2a.get("auth") or {}).get("value"),
+        "tags": a2a.get("tags", []),
+        "version": a2a.get("version", "1.0"),
+    }
+
+    token_override = getattr(settings, "MCP_GATEWAY_BEARER_TOKEN", None)
+
+    # Register agent
+    try:
+        agent_res = register_a2a_agent(payload, idempotent=True, token=token_override)  # type: ignore
+        steps.append(StepResult(step="gateway.a2a_register", ok=True, extra={"response": agent_res}))
+
+        # optional: create a virtual server bound to the agent
+        srv = a2a.get("server")
+        if isinstance(srv, dict) and create_server_with_a2a:
+            server_payload = dict(srv)
+            # ensure association by name (the Gateway can resolve by name/id)
+            assoc = list(server_payload.get("associated_a2a_agents") or [])
+            if payload["name"] not in assoc:
+                assoc.append(payload["name"])
+            server_payload["associated_a2a_agents"] = assoc
+
+            server_res = create_server_with_a2a(server_payload, idempotent=True, token=token_override)  # type: ignore
+            steps.append(StepResult(step="gateway.a2a_server", ok=True, extra={"response": server_res}))
+
+        # record registration success
+        _upsert_entity_registration(
+            db=db,
+            entity_uid=uid,
+            protocol="a2a",
+            target=str(getattr(settings, "MCP_GATEWAY_URL", "")),
+            status="registered",
+            metadata={"agent": {"name": payload["name"], "endpoint_url": payload["endpoint_url"]}},
+        )
+    except Exception as e:
+        steps.append(StepResult(step="gateway.a2a_register", ok=False, stderr=str(e)))
+        _upsert_entity_registration(
+            db=db,
+            entity_uid=uid,
+            protocol="a2a",
+            target=str(getattr(settings, "MCP_GATEWAY_URL", "")),
+            status="failed",
+            metadata={"error": str(e)},
+        )
+
+    return steps
+
+
+def _upsert_entity_registration(
+    db: Session,
+    *,
+    entity_uid: str,
+    protocol: str,
+    target: str,
+    status: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Best-effort upsert into entity_registration (if model/table exists).
+    Never raises; logs on failure.
+    """
+    if not EntityRegistration:
+        log.debug("EntityRegistration model unavailable; skipping registration persistence.")
+        return
+
+    try:
+        # Composite PK: (entity_uid, protocol, target)
+        row = db.get(EntityRegistration, (entity_uid, protocol, target))  # type: ignore[arg-type]
+        now = datetime.utcnow()
+        if not row:
+            row = EntityRegistration(  # type: ignore[call-arg]
+                entity_uid=entity_uid,
+                protocol=protocol,
+                target=target or "",
+                status=status,
+                registered_at=now if status == "registered" else None,
+                metadata=metadata or {},
+            )
+        else:
+            row.status = status
+            if status == "registered":
+                row.registered_at = now
+            if metadata:
+                # merge shallowly
+                try:
+                    row.metadata = {**(row.metadata or {}), **metadata}
+                except Exception:
+                    row.metadata = metadata
+
+        db.add(row)
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("Failed to upsert entity_registration for %s/%s@%s", entity_uid, protocol, target)
 
 
 # --------------------------------------------------------------------------------------

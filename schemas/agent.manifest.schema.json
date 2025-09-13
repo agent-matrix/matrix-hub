@@ -120,6 +120,34 @@
       "description": "Optional map of named endpoints (e.g., REST or MCP endpoints) the agent exposes.",
       "additionalProperties": true
     },
+    "manifests": {
+      "type": "object",
+      "description": "Protocol-native manifest blocks (e.g., A2A). Keys are protocol names.",
+      "additionalProperties": true,
+      "properties": {
+        "a2a": {
+          "type": "object",
+          "description": "A2A transport descriptor for registering/bridging the agent via A2A.",
+          "required": ["endpoint_url"],
+          "properties": {
+            "version": { "type": "string", "default": "1.0" },
+            "endpoint_url": { "type": "string", "format": "uri" },
+            "agent_type": { "type": "string", "enum": ["jsonrpc", "custom"], "default": "jsonrpc" },
+            "auth": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "enum": ["none", "bearer", "api_key"], "default": "none" },
+                "value": { "type": "string" }
+              },
+              "additionalProperties": true
+            },
+            "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+            "server": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": true
+        }
+      }
+    },
     "readme": {
       "type": "string",
       "description": "Optional README content inlined into the manifest (Markdown/plaintext)."

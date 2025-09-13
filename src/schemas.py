@@ -4,16 +4,17 @@ Pydantic DTOs and enums used by Matrix Hub API.
 - Search results (items + scores)
 - Entity detail view
 - Install request/response payloads
+- Non-breaking A2A readiness: adds an EntityRead DTO exposing protocols/manifests.
 """
 
 from __future__ import annotations
 
-import json # <-- 1. IMPORT
+import json  # robust coercion helpers
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator # <-- 2. IMPORT field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ---------------- Enums (kept local to avoid circular imports) ----------------
@@ -41,24 +42,24 @@ JSONValue = Union[str, int, float, bool, None, Dict[str, Any], List[Any]]
 # ---------------- Helper for Reusable Validation ----------------
 
 def _coerce_str_to_list(value: Any) -> List[str]:
-    """Helper to robustly coerce a value into a list of strings."""
+    """Helper to robustly coerce a value into a list of strings (non-throwing)."""
     if isinstance(value, list):
-        return value
+        # Ensure stringified items
+        return [str(item) for item in value]
     if value is None:
         return []
     if isinstance(value, str):
-        # Handle empty string
         if not value.strip():
             return []
-        # Try to parse as JSON list first
+        # Try JSON first
         try:
             parsed = json.loads(value)
             if isinstance(parsed, list):
                 return [str(item) for item in parsed]
         except json.JSONDecodeError:
-            # If not valid JSON, fall back to comma-separated values
-            return [item.strip() for item in value.split(',') if item.strip()]
-    # As a final fallback for other types, return an empty list
+            # Fallback to CSV
+            return [item.strip() for item in value.split(",") if item.strip()]
+    # Any other types fall back to empty list (backward-compatible behavior)
     return []
 
 
@@ -75,7 +76,6 @@ class SearchItem(BaseModel):
     frameworks: Frameworks = Field(default_factory=list)
     providers: Providers = Field(default_factory=list)
 
-    # --- 3. VALIDATOR ADDED ---
     @field_validator("capabilities", "frameworks", "providers", mode="before")
     @classmethod
     def _validate_lists(cls, v: Any) -> List[str]:
@@ -90,7 +90,7 @@ class SearchItem(BaseModel):
     # Populated when with_rag=true (optional short explanation)
     fit_reason: Optional[str] = None
 
-    # --- New optional fields for Top-5 meta search (non-breaking) ---
+    # Optional fields for enriched result cards (non-breaking)
     manifest_url: Optional[str] = None
     install_url: Optional[str] = None
     snippet: Optional[str] = None
@@ -116,7 +116,6 @@ class EntityDetail(BaseModel):
     frameworks: Frameworks = Field(default_factory=list)
     providers: Providers = Field(default_factory=list)
 
-    # --- 4. SAME VALIDATOR REUSED ---
     @field_validator("capabilities", "frameworks", "providers", mode="before")
     @classmethod
     def _validate_lists(cls, v: Any) -> List[str]:
@@ -133,6 +132,50 @@ class EntityDetail(BaseModel):
 
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------- Entity read (A2A-ready; non-breaking addition) ----------------
+
+class EntityRead(BaseModel):
+    """
+    Read DTO for entities, exposing protocol markers and protocol-native manifests.
+    This is additive and does not replace EntityDetail to avoid breaking existing clients.
+    """
+
+    id: str
+    type: str
+    name: str
+    version: str
+
+    summary: Optional[str] = None
+    description: Optional[str] = None
+
+    capabilities: Capabilities = Field(default_factory=list)
+    frameworks: Frameworks = Field(default_factory=list)
+    providers: Providers = Field(default_factory=list)
+
+    @field_validator("capabilities", "frameworks", "providers", mode="before")
+    @classmethod
+    def _validate_lists(cls, v: Any) -> List[str]:
+        return _coerce_str_to_list(v)
+
+    license: Optional[str] = None
+    homepage: Optional[str] = None
+    source_url: Optional[str] = None
+
+    quality_score: float = 0.0
+    release_ts: Optional[datetime] = None
+
+    readme_blob_ref: Optional[str] = None
+
+    created_at: datetime
+    updated_at: datetime
+
+    # NEW: protocol markers and protocol-native manifests
+    # - protocols: e.g., ["a2a@1.0", "mcp@0.1"]
+    # - manifests: protocol-keyed blob (e.g., {"a2a": {...}, "mcp": {...}})
+    protocols: List[str] = Field(default_factory=list)
+    manifests: Optional[Dict[str, Any]] = None
 
 
 # ---------------- Install API ----------------
@@ -156,6 +199,7 @@ class InstallRequest(BaseModel):
     manifest: Optional[Dict[str, Any]] = None
     # Optional: provenance for inline installs so DB + lockfile can record where it came from
     source_url: Optional[str] = None
+
 
 class InstallResponse(BaseModel):
     """
