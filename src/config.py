@@ -3,7 +3,12 @@ Configuration for Matrix Hub.
 - Centralizes all environment-driven settings using pydantic-settings (Pydantic v2).
 - Supports simple env overrides with safe defaults for local development.
 - Exposes a singleton `settings` for the rest of the app to import.
+
+Non-breaking additions:
+- A2A support flags and optional bearer token for gateway override.
+- Tunables for gateway HTTP client pooling and bulk workers (used by gateway client / ingest).
 """
+
 from __future__ import annotations
 
 import json
@@ -177,6 +182,11 @@ class Settings(BaseSettings):
         default="*/15 * * * *",
         validation_alias=AliasChoices("INGEST_CRON", "ingest_cron"),
     )
+    # NEW: concurrent fetch workers for manifest prefetch (safe default)
+    INGEST_MAX_FETCH_WORKERS: int = Field(
+        default=8,
+        validation_alias=AliasChoices("INGEST_MAX_FETCH_WORKERS", "ingest_max_fetch_workers"),
+    )
 
     # ---- Tenancy ----
     TENANCY_MODE: TenancyMode = Field(
@@ -193,6 +203,47 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("MCP_GATEWAY_TOKEN", "mcp_gateway_token"),
     )
+    # NEW: optional pre-minted bearer token override (used by installer A2A path)
+    MCP_GATEWAY_BEARER_TOKEN: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("MCP_GATEWAY_BEARER_TOKEN", "mcp_gateway_bearer_token"),
+    )
+
+    # NEW: HTTP client pooling / keepalive (gateway_client)
+    GATEWAY_HTTP_MAX_CONNECTIONS: int = Field(
+        default=20,
+        validation_alias=AliasChoices("GATEWAY_HTTP_MAX_CONNECTIONS", "gateway_http_max_connections"),
+    )
+    GATEWAY_HTTP_MAX_KEEPALIVE: int = Field(
+        default=10,
+        validation_alias=AliasChoices("GATEWAY_HTTP_MAX_KEEPALIVE", "gateway_http_max_keepalive"),
+    )
+    GATEWAY_HTTP_KEEPALIVE_SECS: float = Field(
+        default=30.0,
+        validation_alias=AliasChoices("GATEWAY_HTTP_KEEPALIVE_SECS", "gateway_http_keepalive_secs"),
+    )
+
+    # NEW: bulk worker counts (used by gateway bulk registration and sync)
+    GATEWAY_BULK_WORKERS: int = Field(
+        default=8,
+        validation_alias=AliasChoices("GATEWAY_BULK_WORKERS", "gateway_bulk_workers"),
+    )
+    GATEWAY_SYNC_WORKERS: int = Field(
+        default=8,
+        validation_alias=AliasChoices("GATEWAY_SYNC_WORKERS", "gateway_sync_workers"),
+    )
+
+    # ---- Feature flags ----
+    INGEST_SCHED_ENABLED: bool = False  # API-safe default (scheduler off by default)
+    DERIVE_TOOLS_FROM_MCP: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DERIVE_TOOLS_FROM_MCP", "derive_tools_from_mcp"),
+    )
+    # NEW: kill-switch for A2A registration (installer best-effort step)
+    A2A_REGISTER_ENABLED: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("A2A_REGISTER_ENABLED", "a2a_register_enabled"),
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -201,13 +252,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    INGEST_SCHED_ENABLED: bool = False  # API-safe default (scheduler off by default)
-
-    DERIVE_TOOLS_FROM_MCP: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("DERIVE_TOOLS_FROM_MCP", "derive_tools_from_mcp"),
-    )
-
+    # ---- Validators ----
     @field_validator("CORS_ALLOW_ORIGINS", mode="before")
     @classmethod
     def _parse_cors(cls, v: Union[str, List[str]]) -> List[str]:
@@ -263,6 +308,7 @@ class Settings(BaseSettings):
                     return SearchWeights(**parsed)
         return SearchWeights()
 
+    # ---- Computed helpers (back-compat) ----
     @property
     def SEARCH_LEXICAL_BACKEND(self) -> str:
         return self.SEARCH_BACKEND__LEXICAL.value
@@ -274,7 +320,7 @@ class Settings(BaseSettings):
     @property
     def SEARCH_HYBRID_WEIGHTS(self) -> str:
         w = self.SEARCH_WEIGHTS
-        return f"sem:{w.semantic},lex:{w.lexical},q:{w.quality},rec:{w.recency}"  
+        return f"sem:{w.semantic},lex:{w.lexical},q:{w.quality},rec:{w.recency}"
 
     @property
     def RAG_ENABLED(self) -> bool:

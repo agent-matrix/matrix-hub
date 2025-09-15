@@ -1,3 +1,4 @@
+# src/models.py
 """
 SQLAlchemy models for Matrix Hub.
 
@@ -179,18 +180,32 @@ class EntityRegistration(Base):
 
     Primary key: (entity_uid, protocol, target)
     Example: ("agent:foo@1.0.0", "a2a", "mcpgateway@prod")
+
+    NOTE:
+      SQLAlchemy's Declarative Base reserves the attribute name `metadata`.
+      We therefore expose the Python attribute as `meta` while mapping it to the
+      database column named "metadata" to retain the intended column name.
     """
 
     __tablename__ = "entity_registration"
 
-    entity_uid: Mapped[str] = mapped_column(String, ForeignKey("entity.uid", ondelete="CASCADE"), primary_key=True)
+    entity_uid: Mapped[str] = mapped_column(
+        String, ForeignKey("entity.uid", ondelete="CASCADE"), primary_key=True
+    )
     protocol: Mapped[str] = mapped_column(String, primary_key=True)
     target: Mapped[str] = mapped_column(String, primary_key=True, default="")
 
     status: Mapped[str] = mapped_column(String, default="unknown")
-    registered_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    registered_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
 
-    # Helpful index for dashboards/queries is created via Alembic migration:
-    # Index('idx_entity_registration_protocol', 'protocol')
+    # IMPORTANT:
+    #   Use Python attr `meta`, but keep DB column name as "metadata" for compatibility.
+    meta: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        "metadata", JSON, nullable=True
+    )
+
+    # Helpful index for dashboards/queries should be created via Alembic migration:
+    #   Index('idx_entity_registration_protocol', 'protocol')

@@ -4,7 +4,8 @@ Pydantic DTOs and enums used by Matrix Hub API.
 - Search results (items + scores)
 - Entity detail view
 - Install request/response payloads
-- Non-breaking A2A readiness: adds an EntityRead DTO exposing protocols/manifests.
+- Non-breaking A2A readiness: adds an EntityRead DTO and exposes
+  protocols/manifests on EntityDetail (additive, backward compatible).
 """
 
 from __future__ import annotations
@@ -120,6 +121,11 @@ class EntityDetail(BaseModel):
     @classmethod
     def _validate_lists(cls, v: Any) -> List[str]:
         return _coerce_str_to_list(v)
+
+    # NEW (non-breaking): expose protocol markers and protocol-native manifests
+    # These fields default to empty/None so existing clients remain unaffected.
+    protocols: List[str] = Field(default_factory=list)
+    manifests: Optional[Dict[str, Any]] = None
 
     license: Optional[str] = None
     homepage: Optional[str] = None
