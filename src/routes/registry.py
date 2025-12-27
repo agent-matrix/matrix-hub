@@ -20,7 +20,6 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
-from ..config import settings
 from ..db import get_db
 from ..models import Entity, MCPEndpoint
 from .. import schemas
