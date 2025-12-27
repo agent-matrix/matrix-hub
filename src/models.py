@@ -91,6 +91,7 @@ class Entity(Base):
     providers: Mapped[List[str]] = mapped_column(JSON, default=list)
 
     readme_blob_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    manifest_blob_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     release_ts: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -162,3 +163,69 @@ class Remote(Base):
 
     __tablename__ = "remote"
     url: Mapped[str] = mapped_column(String, primary_key=True, nullable=False)
+
+
+class MCPEndpoint(Base):
+    """
+    MCP connection details for user-registered MCP servers.
+
+    Stores transport-specific connection parameters separate from Entity
+    to keep the schema clean and support future STDIO/custom transports.
+    """
+
+    __tablename__ = "mcp_endpoint"
+
+    entity_uid: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("entity.uid", ondelete="CASCADE"),
+        primary_key=True,
+        nullable=False
+    )
+
+    transport: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        doc="Transport type: 'SSE' | 'STDIO' | 'WEBSOCKET' | 'HTTP'"
+    )
+
+    url: Mapped[Optional[str]] = mapped_column(
+        String,
+        nullable=True,
+        doc="Base URL for SSE/HTTP/WEBSOCKET transports"
+    )
+
+    # For STDIO transport (future)
+    command: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    args_json: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
+    env_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # HTTP headers and auth
+    headers_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    auth_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Discovery metadata (optional enrichment)
+    discovery_json: Mapped[Optional[dict]] = mapped_column(
+        JSON,
+        nullable=True,
+        doc="Cached discovery results: tools, resources, prompts, capabilities"
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "transport in ('SSE','STDIO','WEBSOCKET','HTTP')",
+            name="ck_mcp_endpoint_transport"
+        ),
+    )

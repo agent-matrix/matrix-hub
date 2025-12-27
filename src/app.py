@@ -35,7 +35,7 @@ from pathlib import Path
 # Local settings & modules
 from .config import settings
 from .db import init_db, close_db
-from .routes import health, catalog, remotes
+from .routes import health, catalog, remotes, registry
 from .routes.catalog_list import router as catalog_list_router
 from .workers import scheduler as ingest_scheduler
 
@@ -214,7 +214,8 @@ def create_app() -> FastAPI:
     # The catalog and remotes routers should define their own subpaths (e.g., /catalog/*).
     app.include_router(catalog.router, tags=["catalog"])
     app.include_router(remotes.router, tags=["remotes"])
-    # Our new “List Catalog” endpoint (GET /catalog)
+    app.include_router(registry.router, tags=["registry"])
+    # Our new "List Catalog" endpoint (GET /catalog)
     app.include_router(catalog_list_router, tags=["catalog"])
 
     # Exception handlers
