@@ -395,8 +395,27 @@ def _resolve_uid(db: Session, entity_id: str, version: Optional[str]) -> str:
 
 def _load_manifest(entity: Entity) -> Optional[Dict[str, Any]]:
     """
-    Fetch and parse the manifest YAML/JSON from entity.source_url.
+    Load manifest from blob storage (if available) or fetch from entity.source_url.
+
+    Priority:
+    1. entity.manifest_blob_ref (blob storage - for user-registered servers)
+    2. entity.source_url (remote URL - for catalog entities)
     """
+    # Try loading from blob storage first
+    if entity.manifest_blob_ref:
+        try:
+            from ..services.search import blobstore
+            text = blobstore.get_text(entity.manifest_blob_ref)
+            if text:
+                data = json.loads(text)
+                if isinstance(data, dict):
+                    log.info("Loaded manifest from blob storage: %s", entity.manifest_blob_ref)
+                    return data
+        except Exception:
+            log.exception("Failed to load manifest from blob storage %s, falling back to source_url",
+                         entity.manifest_blob_ref)
+
+    # Fallback to source_url
     src = (entity.source_url or "").strip()
     if not src:
         return None

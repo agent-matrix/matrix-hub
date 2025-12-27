@@ -170,3 +170,55 @@ class InstallResponse(BaseModel):
     results: List[JSONDict] = Field(default_factory=list)
     files_written: List[str] = Field(default_factory=list)
     lockfile: Optional[JSONDict] = None
+
+
+# ---------------- Registry API (MCP Server Registration) ----------------
+
+class MCPEndpointSpec(BaseModel):
+    """MCP connection details for SSE, STDIO, or other transports."""
+    transport: str = Field(..., description="Transport type: SSE, STDIO, WEBSOCKET, HTTP")
+
+    # For SSE/HTTP/WEBSOCKET
+    url: Optional[str] = Field(None, description="Base URL for network transports")
+    headers: Optional[Dict[str, str]] = Field(None, description="HTTP headers")
+    auth: Optional[Dict[str, Any]] = Field(None, description="Auth credentials/tokens")
+
+    # For STDIO (future)
+    command: Optional[str] = Field(None, description="Command to execute for STDIO")
+    args: Optional[List[str]] = Field(None, description="Arguments for STDIO command")
+    env: Optional[Dict[str, str]] = Field(None, description="Environment variables for STDIO")
+
+
+class RegisterMCPRequest(BaseModel):
+    """
+    Request to register a new MCP server.
+
+    Two modes:
+    1. URL-only mode: Minimal registration with endpoint details + basic metadata
+    2. Full manifest mode: Complete manifest + endpoint details
+    """
+    # Endpoint connection details (required)
+    endpoint: MCPEndpointSpec
+
+    # Entity metadata (used if manifest not provided)
+    id: Optional[str] = Field(None, description="Entity ID (e.g., 'hello-sse-server')")
+    name: Optional[str] = Field(None, description="Display name")
+    version: Optional[str] = Field("0.1.0", description="Semantic version")
+    description: Optional[str] = Field(None, description="Description")
+    summary: Optional[str] = Field(None, description="Short summary")
+    capabilities: Optional[List[str]] = Field(default_factory=list, description="Capabilities")
+
+    # Full manifest (optional, takes precedence)
+    manifest: Optional[Dict[str, Any]] = Field(None, description="Complete MCP server manifest")
+
+    # Discovery options
+    discover: bool = Field(False, description="Attempt to discover tools/resources/prompts")
+
+
+class RegisterMCPResponse(BaseModel):
+    """Response from MCP server registration."""
+    ok: bool = True
+    uid: str = Field(..., description="Entity UID created (e.g., 'mcp_server:hello@0.1.0')")
+    manifest_blob_ref: Optional[str] = Field(None, description="Blob storage reference for manifest")
+    endpoint_saved: bool = Field(True, description="Whether endpoint was saved to mcp_endpoint table")
+    discovery: Optional[Dict[str, Any]] = Field(None, description="Discovery results if requested")
