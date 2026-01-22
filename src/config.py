@@ -76,10 +76,15 @@ class Settings(BaseSettings):
     # ---- App ----
     APP_NAME: str = "Matrix Hub"
     APP_VERSION: str = "0.1.0"
+    MATRIX_ENV: str = Field(default="dev", validation_alias=AliasChoices("MATRIX_ENV", "ENV"))
     HOST: str = "0.0.0.0"
     PORT: int = 443
     LOG_LEVEL: str = "INFO"
     API_TOKEN: Optional[str] = None
+    REQUIRE_API_TOKEN_IN_PROD: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("REQUIRE_API_TOKEN_IN_PROD", "require_api_token_in_prod"),
+    )
 
     # Public-facing base URL used to build absolute links in API responses.
     # Safe default for local/dev; override via env in production.
@@ -105,6 +110,10 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices(
             "CORS_ALLOW_ORIGINS", "cors_allow_origins",
         ),
+    )
+    CORS_ALLOW_CREDENTIALS: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CORS_ALLOW_CREDENTIALS", "cors_allow_credentials"),
     )
 
     # ---- Search backends ----
@@ -176,6 +185,16 @@ class Settings(BaseSettings):
     INGEST_CRON: str = Field(
         default="*/15 * * * *",
         validation_alias=AliasChoices("INGEST_CRON", "ingest_cron"),
+    )
+
+    # ---- Remote safety (SSRF + supply-chain hygiene) ----
+    REMOTE_ALLOW_HOSTS: Union[List[str], str] = Field(
+        default_factory=list,
+        validation_alias=AliasChoices("REMOTE_ALLOW_HOSTS", "remote_allow_hosts"),
+    )
+    REMOTE_BLOCK_HOSTS: Union[List[str], str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "0.0.0.0"],
+        validation_alias=AliasChoices("REMOTE_BLOCK_HOSTS", "remote_block_hosts"),
     )
 
     # ---- Tenancy ----
