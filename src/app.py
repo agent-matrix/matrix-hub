@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from .middleware.reqlog import RequestLogMiddleware  # NEW
+from .middleware.ratelimit import SimpleRateLimitMiddleware
 
 # --- Added: Alembic imports for DB migrations ---
 from alembic import command
@@ -134,6 +135,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     log = logging.getLogger("app")
     log.info("Starting Matrix Hub...")
 
+    # Fail-closed: never allow production deployments without API_TOKEN
+    if (settings.MATRIX_ENV or "").lower() in ("prod", "production"):
+        if settings.REQUIRE_API_TOKEN_IN_PROD and not settings.API_TOKEN:
+            log.error(
+                "Refusing to start: MATRIX_ENV=production but API_TOKEN is not set. "
+                "Set API_TOKEN (or disable REQUIRE_API_TOKEN_IN_PROD explicitly)."
+            )
+            raise RuntimeError("Missing API_TOKEN in production")
+
     # Initialize DB and verify connectivity
     try:
         init_db()
@@ -184,12 +194,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 # ---------- App factory ----------
 def create_app() -> FastAPI:
+    is_prod = (settings.MATRIX_ENV or "").lower() in ("prod", "production")
+
     app = FastAPI(
         title="Matrix Hub",
         version=getattr(settings, "APP_VERSION", "0.1.0"),
-        docs_url="/docs",
-        redoc_url="/redoc",
-        openapi_url="/openapi.json",
+        docs_url=None if is_prod else "/docs",
+        redoc_url=None if is_prod else "/redoc",
+        openapi_url=None if is_prod else "/openapi.json",
         lifespan=lifespan,
     )
 
@@ -197,15 +209,26 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIdMiddleware)
     # High-signal request/response logging (method, path, status, duration)
     app.add_middleware(RequestLogMiddleware)
+
+    # Production guard: don't allow wildcard CORS in production
+    if is_prod:
+        if "*" in (settings.CORS_ALLOW_ORIGINS or []):
+            raise RuntimeError("CORS_ALLOW_ORIGINS cannot include '*' in production")
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.CORS_ALLOW_ORIGINS or ["*"],
-        allow_credentials=True,
+        allow_credentials=bool(settings.CORS_ALLOW_CREDENTIALS),
         allow_methods=["GET", "POST", "OPTIONS", "PUT", "PATCH", "DELETE"],
         allow_headers=["*"],
         expose_headers=["X-Request-ID", "X-Response-Time-ms"],
         max_age=3600,
     )
+
+    # Optional: basic rate limit safety net (prefer LB/gateway rate limiting)
+    if is_prod:
+        app.add_middleware(SimpleRateLimitMiddleware, max_requests=60, window_seconds=60)
+
     # Light compression (safe defaults)
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 

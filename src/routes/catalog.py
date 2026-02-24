@@ -23,6 +23,7 @@ from fastapi.responses import RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from ..utils.security import require_api_token
 from ..db import get_db
 from ..models import Entity
 from .. import schemas
@@ -259,6 +260,7 @@ def get_entity(
     "/install",
     response_model=schemas.InstallResponse,
     summary="Install an entity and optionally register it with MCP-Gateway",
+    dependencies=[Depends(require_api_token)],
 )
 def install_entity_route(
     req: schemas.InstallRequest,

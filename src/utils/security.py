@@ -36,6 +36,7 @@ def require_api_token(request: Request) -> None:
       - or query parameter ?token=<token> (useful for local testing)
     """
     if not is_auth_enabled():
+        request.state.is_admin = False
         return  # no-op
 
     auth = request.headers.get("Authorization") or request.headers.get("authorization") or ""
@@ -52,3 +53,4 @@ def require_api_token(request: Request) -> None:
             detail="Invalid or missing bearer token.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    request.state.is_admin = True

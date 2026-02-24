@@ -18,6 +18,7 @@ from ..models import Remote, Entity
 from ..services.ingest import ingest_index
 from ..services.install import sync_registry_gateways
 from ..utils.security import require_api_token
+from ..utils.url_safety import assert_remote_url_allowed
 # --------------------------------------------------------------------------------------
 
 log = logging.getLogger(__name__)
@@ -231,6 +232,7 @@ def sync_remotes(
     background: BackgroundTasks,
     wait: bool = False,
     db: Session = Depends(get_db),
+    _auth: None = Depends(require_api_token),
 ):
     """
     Trigger a full sync: ingest all configured remotes into Matrix Hub,
@@ -255,7 +257,7 @@ def sync_remotes(
     }
 
 @router.get("/remotes/sync/{job_id}")
-def get_sync_status(job_id: str):
+def get_sync_status(job_id: str, _auth: None = Depends(require_api_token)):
     """Poll background sync status."""
     p = _status_path(job_id)
     if not p.exists():
@@ -409,7 +411,7 @@ def bulk_delete_pending_gateways(
 # CRUD operations for remotes
 
 @router.get("/remotes", response_model=RemoteListResponse)
-def list_remotes(db: Session = Depends(get_db)) -> RemoteListResponse:
+def list_remotes(db: Session = Depends(get_db), _auth: None = Depends(require_api_token)) -> RemoteListResponse:
     """List all remotes from the database."""
     rows = db.query(Remote).order_by(Remote.url).all()
     items = [RemoteItem(url=r.url) for r in rows]
@@ -437,6 +439,7 @@ def create_remote(
     Add a new remote index URL to the catalog.
     """
     url_str = str(req.url)
+    assert_remote_url_allowed(url_str)
 
     # Check if it already exists
     existing = db.query(Remote).filter(Remote.url == url_str).first()
@@ -467,6 +470,7 @@ def delete_remote(
     Remove an existing remote index URL from the catalog.
     """
     url_str = str(req.url)
+    assert_remote_url_allowed(url_str)
 
     # Check if it exists
     existing = db.query(Remote).filter(Remote.url == url_str).first()
@@ -501,6 +505,10 @@ def trigger_ingest(
 
     if not targets:
         return IngestResponse(results=[])
+
+    # SSRF safety check for all targets
+    for u in targets:
+        assert_remote_url_allowed(u)
 
     results: List[IngestItemResult] = []
     for url in targets:
