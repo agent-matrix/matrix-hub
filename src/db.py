@@ -232,7 +232,6 @@ def get_read_db() -> Generator[Session, None, None]:
 
 
 @contextmanager
-
 def session_scope() -> Generator[Session, None, None]:
     """
     Context manager for standalone database sessions:
