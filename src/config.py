@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     APP_VERSION: str = "0.1.0"
     MATRIX_ENV: str = Field(default="dev", validation_alias=AliasChoices("MATRIX_ENV", "ENV"))
     HOST: str = "0.0.0.0"
-    PORT: int = 443
+    PORT: int = 8000
     LOG_LEVEL: str = "INFO"
     API_TOKEN: Optional[str] = None
     REQUIRE_API_TOKEN_IN_PROD: bool = Field(
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # Public-facing base URL used to build absolute links in API responses.
     # Safe default for local/dev; override via env in production.
     PUBLIC_BASE_URL: str = Field(
-        default="http://127.0.0.1:443",
+        default="http://127.0.0.1:8000",
         description="Public base URL for generating absolute links in API responses.",
         validation_alias=AliasChoices("PUBLIC_BASE_URL", "public_base_url"),
     )

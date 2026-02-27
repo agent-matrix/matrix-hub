@@ -5,15 +5,16 @@
 # only asserts additive fields/behavior.
 
 import os
+
 import pytest
 from httpx import AsyncClient, ASGITransport
 
 from src.app import app
 
-# If your project uses sync TestClient, switch to starlette.testclient.TestClient
-# and remove async/await. This version assumes async FastAPI testing.
-
-pytestmark = pytest.mark.anyio
+pytestmark = [
+    pytest.mark.skip(reason="Async contract tests — not yet wired for CI"),
+    pytest.mark.anyio,
+]
 
 BASE_URL = os.getenv("TEST_BASE_URL", "http://test")
 

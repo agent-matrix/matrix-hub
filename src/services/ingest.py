@@ -36,7 +36,7 @@ from ..db import session_scope
 
 # Search & embedding utilities
 from .search.chunking import split_text  # type: ignore
-from .search.backends import embedder, vector, blobstore  # type_ignore
+from .search.backends import embedder, vector, blobstore  # type: ignore
 from ..db import save_entity
 
 log = logging.getLogger("ingest")
@@ -139,7 +139,7 @@ def _prefetch_manifests(manifest_urls: List[str]) -> List[tuple[str, Dict[str, A
 # ----------------------------------------------------------------------
 # Ingest a single remote index (with detailed logging)
 # ----------------------------------------------------------------------
-def _indicates_sse_messages_url(url: str, transport: str) -> str:
+def _normalize_sse_url(url: str, transport: str) -> str:
     """Normalize SSE server URL to end with /messages/ if required."""
     normalized = url.rstrip("/")
     if transport == "SSE" and normalized:
@@ -219,7 +219,7 @@ def _ingest_remote(remote: str, db: Session, do_embed: bool) -> RemoteIngestResu
                     url = (server.get("url") or "").strip()
                     transport = (server.get("transport") or "").upper()
                     if url:
-                        url = _indicates_sse_messages_url(url, transport)
+                        url = _normalize_sse_url(url, transport)
 
                     if url:
                         try:

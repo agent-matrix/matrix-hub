@@ -106,7 +106,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 async def unhandled_exception_handler(request: Request, exc: Exception):
-    logging.getLogger("app").exception("Unhandled exception", exc_info=exc)
+    logging.getLogger("app").exception("Unhandled exception", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "src.app:app",
         host="0.0.0.0",
-        port=int(os.getenv("PORT", 443)),
+        port=int(os.getenv("PORT", 8000)),
         log_level=settings.LOG_LEVEL.lower(),
         reload=True,           # optional for dev
         factory=False,         # app is an instance, not a factory function
