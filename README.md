@@ -15,12 +15,14 @@ Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 **Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
 
-* **API**: FastAPI on port **443**
+* **API**: FastAPI on port **8000** (production: behind reverse proxy on 443)
+* **Frontend**: [matrixhub.io](https://matrixhub.io) — Next.js web UI ([ruslanmv/matrixhub](https://github.com/ruslanmv/matrixhub))
 * **DB**: PostgreSQL (SQLite supported for lightweight/dev use)
 * **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed
 * **Install**: Idempotent steps, project adapters, lockfile generation
 * **Auth**: Optional bearer‑token for admin endpoints
 * **Logs**: Structured JSON with correlation IDs
+* **Docker**: `docker pull ruslanmv/matrix-hub:latest`
 
 ## What is Matrix Hub?
 
@@ -446,11 +448,68 @@ docker run -p 443:443 --env-file .env ghcr.io/agent-matrix/matrix-hub:latest
 
 Apache‑2.0. See [LICENSE](LICENSE).
 
+## Docker Hub
+
+The official Docker image is available on Docker Hub:
+
+```bash
+# Pull the latest image
+docker pull ruslanmv/matrix-hub:latest
+
+# Run with default settings (SQLite, port 8000)
+docker run -d -p 8000:8000 --name matrix-hub ruslanmv/matrix-hub:latest
+
+# Run with PostgreSQL and custom config
+docker run -d -p 8000:8000 \
+  -e DATABASE_URL=postgresql+psycopg://matrix:matrix@db:5432/matrixhub \
+  -e API_TOKEN=your-secret-token \
+  -e CATALOG_REMOTES='["https://raw.githubusercontent.com/agent-matrix/catalog/main/index.json"]' \
+  --name matrix-hub \
+  ruslanmv/matrix-hub:latest
+
+# Build locally
+make container-build
+make container-run
+```
+
+## Frontend Integration
+
+The official web frontend is [MatrixHub](https://github.com/ruslanmv/matrixhub), deployed at [matrixhub.io](https://matrixhub.io).
+
+The frontend communicates with this backend via server-side proxy routes:
+
+| Frontend Route | Backend Route | Purpose |
+|:---------------|:-------------|:--------|
+| `GET /api/search` | `GET /catalog/search` | Hybrid search |
+| `GET /api/latest` | `GET /catalog` | List by type |
+| `GET /api/entities/[id]` | `GET /catalog/entities/{id}` | Entity detail |
+| `GET /api/manifest/[id]` | `GET /catalog/manifest/{id}` | Manifest JSON |
+| `POST /api/install` | `POST /catalog/install` | Install entity |
+
+To connect the frontend to your backend, set `MATRIX_HUB_BASE` in the frontend's `.env.local`:
+
+```bash
+MATRIX_HUB_BASE=https://api.matrixhub.io
+```
+
+## DNS Configuration (Production)
+
+| Record | Name | Value | Purpose |
+|:-------|:-----|:------|:--------|
+| A | `api.matrixhub.io` | `129.213.165.60` | Backend API |
+| A | `matrixhub.io` | `216.198.79.1` | Frontend (Vercel) |
+| CNAME | `www.matrixhub.io` | `*.vercel-dns-017.com` | Frontend www redirect |
+
 ## See also
+
+- **[matrixhub](https://github.com/ruslanmv/matrixhub)** — Web frontend (Next.js)
+- **[agent-generator](https://github.com/ruslanmv/agent-generator)** — AI agent scaffolding tool
+- **[catalog](https://github.com/agent-matrix/catalog)** — Curated manifest repository
 
 **Schemas:**
 
 * Agent — `schemas/agent.manifest.schema.json`
 * Tool — `schemas/tool.manifest.schema.json`
 * MCP Server — `schemas/mcp-server.manifest.schema.json`
-  **Tests:** `tests/` — smoke tests and examples; run with `make test`.
+
+**Tests:** `tests/` — smoke tests and examples; run with `make test`.
