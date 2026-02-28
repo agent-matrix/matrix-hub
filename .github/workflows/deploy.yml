@@ -1,0 +1,146 @@
+name: "Deploy to Oracle Cloud"
+
+# Triggers:
+# 1. Automatically after Docker Hub push completes (on release)
+# 2. Manually via workflow_dispatch
+on:
+  workflow_run:
+    workflows: ["📦 Publish Docker (Docker Hub)"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Docker image tag to deploy (default: latest)"
+        required: false
+        default: "latest"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-oci
+  cancel-in-progress: false  # never cancel a running deploy
+
+env:
+  DOCKER_IMAGE: ruslanmv/matrix-hub
+  OCI_HOST: ${{ secrets.OCI_HOST }}            # 129.213.165.60
+  OCI_USER: ${{ secrets.OCI_USER || 'opc' }}   # Oracle Linux default
+  CONTAINER_NAME: matrix-hub
+  HUB_PORT: 443
+  GATEWAY_PORT: 4444
+
+jobs:
+  deploy:
+    name: Deploy to OCI
+    runs-on: ubuntu-latest
+    # Only deploy if the triggering workflow succeeded (or manual dispatch)
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+
+    steps:
+      - name: Checkout (for deploy scripts)
+        uses: actions/checkout@v4
+
+      - name: Determine image tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.image_tag || 'latest' }}"
+          else
+            TAG="latest"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Deploying ${DOCKER_IMAGE}:${TAG}"
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.OCI_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key
+          chmod 600 ~/.ssh/oci_key
+          # Disable strict host checking for CI
+          cat >> ~/.ssh/config <<EOF
+          Host oci-prod
+            HostName ${{ env.OCI_HOST }}
+            User ${{ env.OCI_USER }}
+            IdentityFile ~/.ssh/oci_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+            ConnectTimeout 30
+          EOF
+
+      - name: Deploy via SSH
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.TAG }}
+        run: |
+          ssh oci-prod bash -s <<'DEPLOY_SCRIPT'
+          set -euo pipefail
+
+          IMAGE="ruslanmv/matrix-hub"
+          TAG="${TAG:-latest}"
+          CONTAINER="matrix-hub"
+
+          echo "=== Pulling ${IMAGE}:${TAG} ==="
+          docker pull "${IMAGE}:${TAG}"
+
+          echo "=== Stopping current container ==="
+          docker stop "${CONTAINER}" 2>/dev/null || true
+          docker rm "${CONTAINER}" 2>/dev/null || true
+
+          echo "=== Starting new container ==="
+          docker run -d \
+            --name "${CONTAINER}" \
+            --restart unless-stopped \
+            -p 443:443 \
+            -p 4444:4444 \
+            --env-file /home/opc/matrix-hub/.env \
+            -v matrixhub_data:/app/data \
+            "${IMAGE}:${TAG}"
+
+          echo "=== Waiting for health check ==="
+          RETRIES=0
+          MAX_RETRIES=30
+          until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1; do
+            RETRIES=$((RETRIES + 1))
+            if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+              echo "ERROR: Health check failed after ${MAX_RETRIES} attempts"
+              docker logs --tail 50 "${CONTAINER}"
+              exit 1
+            fi
+            echo "  Waiting... (${RETRIES}/${MAX_RETRIES})"
+            sleep 2
+          done
+
+          echo "=== Health check passed ==="
+          curl -s "http://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
+
+          echo "=== Cleaning up old images ==="
+          docker image prune -f
+
+          echo "=== Deploy complete ==="
+          DEPLOY_SCRIPT
+
+      - name: Verify deployment (external)
+        shell: bash
+        run: |
+          echo "Verifying external access to https://api.matrixhub.io..."
+          sleep 5
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health" || echo "000")
+          if [ "$STATUS" = "200" ]; then
+            echo "External health check passed (HTTP $STATUS)"
+          else
+            echo "WARNING: External health check returned HTTP $STATUS (may need DNS/TLS propagation)"
+          fi
+
+      - name: Notify on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "::error::Deployment to OCI failed. Check the deploy step logs above."
+          echo "Manual recovery: ssh into ${{ env.OCI_HOST }} and run:"
+          echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
+          echo "  docker stop ${{ env.CONTAINER_NAME }} && docker rm ${{ env.CONTAINER_NAME }}"
+          echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped -p 443:443 -p 4444:4444 --env-file /home/opc/matrix-hub/.env -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
