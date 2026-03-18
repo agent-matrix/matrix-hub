@@ -71,7 +71,9 @@ help:
 	@printf "$(BRIGHT_GREEN)  %-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "--------------------" "--------------------------------------------------------"
 	@echo
 	@echo "$(BRIGHT_GREEN)Core Operations$(RESET)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "install" "📦 Install dependencies (alias for setup)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "setup" "🔌 Jack in & load programs (create .venv, install deps)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "build" "🏗️  Build Docker container (alias for container-build)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "dev" "😎 Operator mode (run API with live reload)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run" "▶️ Execute main program (run API in production mode)"
 	@echo
@@ -102,6 +104,14 @@ help:
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "container-build" "🏗️  Construct a containerized reality"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "container-run" "🚢 Deploy program into the Matrix"
 	@echo
+	@echo "$(BRIGHT_GREEN)Cloud Deployment (OCI)$(RESET)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy" "🚀 Deploy latest image to OCI production"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy-tag" "🏷️  Deploy specific tag: make deploy-tag TAG=v1.2.3"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy-dry" "🔍 Dry-run deploy (print commands only)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy-status" "📊 Check production health & status"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy-logs" "📜 Tail production container logs"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "deploy-ssh" "🔐 SSH into production instance"
+	@echo
 	@echo "$(BRIGHT_GREEN)Monitoring & Logs$(RESET)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "monitor-gateway" "🛰️  Monitor gateway health"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "monitor-hub" "💻 Monitor hub health"
@@ -118,7 +128,8 @@ $(VENV_DIR)/installed: pyproject.toml
 	@echo "$(BRIGHT_GREEN)Setup complete. You are The One.$(RESET)"
 	@touch $@
 
-.PHONY: setup
+.PHONY: install setup
+install: setup
 setup: $(VENV_DIR)/installed
 
 # Main Program Execution
@@ -242,7 +253,8 @@ PULL_RUNTIME          ?= 0
 REPLACE               ?= 1
 GW_SKIP               ?= 0
 
-.PHONY: container-build
+.PHONY: build container-build
+build: container-build
 container-build:
 	@echo "$(DIM_GREEN)-> Compiling residual self-image into container $(IMAGE_NAME):$(IMAGE_TAG)...$(RESET)"
 	@$(BASH) $(SCRIPTS_DIR)/build_container.sh \
@@ -291,3 +303,74 @@ logs-gateway:
 logs-hub:
 	@CONTAINER_NAME=$${CONTAINER_NAME:-$(CONTAINER_NAME)} LINES=$${LINES:-$(LOG_LINES)} \
 	$(BASH) $(SCRIPTS_DIR)/logs-hub.sh $(ARGS)
+
+# ===========================================
+# Cloud Deployment (OCI)
+# ===========================================
+OCI_HOST        ?= 129.213.165.60
+OCI_USER        ?= opc
+OCI_SSH_KEY     ?= ~/.ssh/id_rsa
+DEPLOY_IMAGE    ?= ruslanmv/matrix-hub
+DEPLOY_TAG      ?= latest
+DEPLOY_CONTAINER ?= matrix-hub
+
+.PHONY: deploy deploy-tag deploy-dry deploy-status deploy-logs deploy-ssh deploy-setup
+
+deploy:
+	@echo "$(BRIGHT_GREEN)Deploying $(DEPLOY_IMAGE):$(DEPLOY_TAG) to OCI $(OCI_HOST)...$(RESET)"
+	@IMAGE_TAG=$(DEPLOY_TAG) DOCKER_IMAGE=$(DEPLOY_IMAGE) CONTAINER_NAME=$(DEPLOY_CONTAINER) \
+	 OCI_HOST=$(OCI_HOST) OCI_USER=$(OCI_USER) OCI_SSH_KEY=$(OCI_SSH_KEY) \
+	 $(BASH) $(SCRIPTS_DIR)/deploy_oci.sh
+
+deploy-tag:
+	@test -n "$(TAG)" || (echo "Usage: make deploy-tag TAG=v1.2.3"; exit 2)
+	@echo "$(BRIGHT_GREEN)Deploying $(DEPLOY_IMAGE):$(TAG) to OCI $(OCI_HOST)...$(RESET)"
+	@IMAGE_TAG=$(TAG) DOCKER_IMAGE=$(DEPLOY_IMAGE) CONTAINER_NAME=$(DEPLOY_CONTAINER) \
+	 OCI_HOST=$(OCI_HOST) OCI_USER=$(OCI_USER) OCI_SSH_KEY=$(OCI_SSH_KEY) \
+	 $(BASH) $(SCRIPTS_DIR)/deploy_oci.sh
+
+deploy-dry:
+	@echo "$(DIM_GREEN)Dry-run deployment (no changes will be made)...$(RESET)"
+	@DRY_RUN=1 IMAGE_TAG=$(DEPLOY_TAG) DOCKER_IMAGE=$(DEPLOY_IMAGE) CONTAINER_NAME=$(DEPLOY_CONTAINER) \
+	 OCI_HOST=$(OCI_HOST) OCI_USER=$(OCI_USER) OCI_SSH_KEY=$(OCI_SSH_KEY) \
+	 $(BASH) $(SCRIPTS_DIR)/deploy_oci.sh
+
+deploy-status:
+	@echo "$(DIM_GREEN)Checking production health...$(RESET)"
+	@ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i $(OCI_SSH_KEY) $(OCI_USER)@$(OCI_HOST) \
+	 'echo "=== Container ===" && docker ps --filter name=$(DEPLOY_CONTAINER) --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" && echo "" && echo "=== Health ===" && curl -s http://127.0.0.1:443/health?check_db=true && echo "" && echo "=== Resources ===" && docker stats $(DEPLOY_CONTAINER) --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}"'
+
+deploy-logs:
+	@echo "$(DIM_GREEN)Tailing production logs...$(RESET)"
+	@ssh -o StrictHostKeyChecking=no -i $(OCI_SSH_KEY) $(OCI_USER)@$(OCI_HOST) \
+	 "docker logs -f --tail $${LINES:-200} $(DEPLOY_CONTAINER)"
+
+deploy-ssh:
+	@echo "$(DIM_GREEN)Connecting to OCI instance...$(RESET)"
+	@ssh -o StrictHostKeyChecking=no -i $(OCI_SSH_KEY) $(OCI_USER)@$(OCI_HOST)
+
+deploy-setup:
+	@echo "$(DIM_GREEN)Setting up OCI instance for first deployment...$(RESET)"
+	@ssh -o StrictHostKeyChecking=no -i $(OCI_SSH_KEY) $(OCI_USER)@$(OCI_HOST) bash -s <<'SETUP'
+	set -euo pipefail
+	echo "=== Installing Docker ==="
+	if ! command -v docker &>/dev/null; then
+	  sudo yum install -y docker || sudo apt-get install -y docker.io
+	  sudo systemctl enable --now docker
+	  sudo usermod -aG docker $$(whoami)
+	  echo "Docker installed. Please log out and back in, then re-run deploy-setup."
+	  exit 0
+	fi
+	echo "Docker: $$(docker --version)"
+	echo "=== Creating directories ==="
+	mkdir -p ~/matrix-hub
+	if [ ! -f ~/matrix-hub/.env ]; then
+	  echo "WARNING: ~/matrix-hub/.env not found. Create it before deploying."
+	  echo "Copy .env.prod from the repo and adjust DATABASE_URL and other settings."
+	fi
+	echo "=== Opening firewall ports ==="
+	sudo firewall-cmd --permanent --add-port=443/tcp 2>/dev/null || sudo iptables -A INPUT -p tcp --dport 443 -j ACCEPT 2>/dev/null || true
+	sudo firewall-cmd --permanent --add-port=4444/tcp 2>/dev/null || sudo iptables -A INPUT -p tcp --dport 4444 -j ACCEPT 2>/dev/null || true
+	sudo firewall-cmd --reload 2>/dev/null || true
+	echo "=== Setup complete ==="
+	SETUP
