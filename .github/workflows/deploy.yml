@@ -43,16 +43,19 @@ jobs:
         shell: bash
         env:
           OCI_HOST:            ${{ secrets.OCI_HOST }}
+          OCI_USER:            ${{ secrets.OCI_USER }}
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
         run: |
           missing=()
           [ -n "$OCI_HOST"            ] || missing+=(OCI_HOST)
+          [ -n "$OCI_USER"            ] || missing+=(OCI_USER)
           [ -n "$OCI_SSH_PRIVATE_KEY" ] || missing+=(OCI_SSH_PRIVATE_KEY)
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing required secrets: ${missing[*]}"
             echo "Add them in repo Settings → Secrets and variables → Actions:"
-            echo "  OCI_HOST                 = the public IP of the Hub VM (e.g. 129.213.165.60)"
-            echo "  OCI_USER                 = ssh user (default opc; use 'ubuntu' for Ubuntu hosts)"
+            echo "  OCI_HOST                 = the public IP of the Hub VM"
+            echo "                              (Oracle Linux: 141.148.40.165, Ubuntu: 129.213.165.60)"
+            echo "  OCI_USER                 = ssh user — 'opc' for Oracle Linux, 'ubuntu' for Ubuntu"
             echo "  OCI_SSH_PRIVATE_KEY      = full PEM contents of the deploy private key"
             echo "  OCI_KNOWN_HOSTS          = (optional) ssh-keyscan output, otherwise we run keyscan"
             exit 1
@@ -74,96 +77,77 @@ jobs:
         shell: bash
         env:
           OCI_HOST: ${{ secrets.OCI_HOST }}
-          OCI_USER: ${{ secrets.OCI_USER || 'opc' }}
+          OCI_USER: ${{ secrets.OCI_USER }}
           KEY:      ${{ secrets.OCI_SSH_PRIVATE_KEY }}
           KNOWN:    ${{ secrets.OCI_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-          mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          # Strip trailing CR characters in case the secret was copy-pasted on Windows.
-          printf '%s\n' "$KEY" | sed 's/\r$//' > ~/.ssh/oci_key
-          chmod 600 ~/.ssh/oci_key
 
-          # Print the *public* fingerprint so we can compare against
-          # ~/.ssh/authorized_keys on the VM. Never prints the key itself.
-          echo "--- deploy key fingerprint (compare with the public key in ~${OCI_USER}/.ssh/authorized_keys on the VM) ---"
-          if ssh-keygen -l -f ~/.ssh/oci_key 2>/tmp/_kg.err; then
-            :
-          else
-            echo "::error::ssh-keygen could not parse OCI_SSH_PRIVATE_KEY:"
-            sed 's/^/  /' /tmp/_kg.err
-            echo "Common causes: secret pasted with Windows CRLF endings; missing trailing newline; PuTTY .ppk format instead of OpenSSH PEM."
+          if [ -z "${OCI_USER:-}" ]; then
+            echo "::error::Missing OCI_USER. Use 'opc' for Oracle Linux or 'ubuntu' for Ubuntu."
             exit 1
           fi
-          # Also print the *derived* public key (without comment) so you can
-          # paste it directly into authorized_keys if it isn't there yet.
-          echo "--- public key derived from OCI_SSH_PRIVATE_KEY (paste this into ~${OCI_USER}/.ssh/authorized_keys on the VM if missing) ---"
-          ssh-keygen -y -f ~/.ssh/oci_key
 
-          # known_hosts: pinned secret if given, else ssh-keyscan (TOFU within run)
-          if [ -n "$KNOWN" ]; then
-            printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
-            echo "Using OCI_KNOWN_HOSTS from secret ($(wc -l < ~/.ssh/known_hosts) lines)."
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Normalize Windows CRLF keys
+          printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/oci_key
+          chmod 600 ~/.ssh/oci_key
+
+          # Validate private key format and derive the matching public key
+          # so the operator can paste it into ~user/.ssh/authorized_keys on
+          # the VM if missing. The private key is never printed.
+          ssh-keygen -y -f ~/.ssh/oci_key > ~/.ssh/oci_key.pub || {
+            echo "::error::OCI_SSH_PRIVATE_KEY is not a valid private key, or it is passphrase-protected."
+            exit 1
+          }
+          echo "--- public key derived from OCI_SSH_PRIVATE_KEY ---"
+          echo "(paste this into ~${OCI_USER}/.ssh/authorized_keys on ${OCI_HOST} if missing):"
+          cat ~/.ssh/oci_key.pub
+          echo "--- fingerprint ---"
+          ssh-keygen -l -f ~/.ssh/oci_key.pub
+
+          if [ -n "${KNOWN:-}" ]; then
+            printf '%s\n' "$KNOWN" | tr -d '\r' > ~/.ssh/known_hosts
           else
-            echo "OCI_KNOWN_HOSTS not set — running ssh-keyscan against $OCI_HOST…"
-            ssh-keyscan -H -T 10 "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null || true
-            if ! [ -s ~/.ssh/known_hosts ]; then
-              echo "::error::ssh-keyscan returned no host keys — is OCI_HOST=\"$OCI_HOST\" reachable on TCP/22?"
-              exit 1
-            fi
+            ssh-keyscan -H -T 15 "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null
           fi
+
+          if ! [ -s ~/.ssh/known_hosts ]; then
+            echo "::error::No SSH host key found for $OCI_HOST. Port 22 may be unreachable."
+            exit 1
+          fi
+
           chmod 644 ~/.ssh/known_hosts
 
-          # Build ~/.ssh/config defensively. Empty values explode loudly here,
-          # not later as a cryptic 'no argument after keyword "hostname"'.
           cat > ~/.ssh/config <<EOF
           Host oci-prod
-            HostName ${OCI_HOST}
-            User ${OCI_USER}
+            HostName $OCI_HOST
+            User $OCI_USER
             IdentityFile ~/.ssh/oci_key
             IdentitiesOnly yes
+            BatchMode yes
             StrictHostKeyChecking yes
             UserKnownHostsFile ~/.ssh/known_hosts
             ConnectTimeout 30
-            BatchMode yes
             PreferredAuthentications publickey
             PasswordAuthentication no
             KbdInteractiveAuthentication no
           EOF
+
           chmod 600 ~/.ssh/config
 
-          echo "Final ~/.ssh/config (mode $(stat -c %a ~/.ssh/config)):"
-          sed 's/^/  /' ~/.ssh/config
-
-      - name: Pre-flight SSH check
-        shell: bash
-        env:
-          OCI_USER: ${{ secrets.OCI_USER || 'opc' }}
-        run: |
-          set +e
-          # BatchMode + PasswordAuthentication=no in ~/.ssh/config means this
-          # exits non-zero immediately on auth failure instead of hanging on a
-          # password prompt. We add a verbose run on failure for diagnostics.
-          out="$(ssh oci-prod -o ConnectTimeout=10 'whoami; uname -a; ls -la ~/.ssh/authorized_keys 2>/dev/null || echo NO_AUTHORIZED_KEYS' 2>&1)"
-          rc=$?
-          echo "$out" | sed 's/^/  /'
-          if [ $rc -ne 0 ]; then
+          echo "Testing SSH login..."
+          if ! ssh -vvv oci-prod 'echo "SSH OK"; whoami; hostname; uptime'; then
             echo
-            echo "::error::SSH preflight failed (exit $rc). Detailed verbose log follows:"
-            ssh -vvv oci-prod -o ConnectTimeout=10 true 2>&1 | tail -n 80 | sed 's/^/  /'
-            cat <<HINT
-          Most likely causes (Permission denied, publickey):
-            1. OCI_USER is wrong. Ubuntu images use 'ubuntu', Oracle Linux uses 'opc'.
-               You currently have OCI_USER='${OCI_USER}'. Check which OS the VM runs.
-            2. The PUBLIC key derived above is not in ~${OCI_USER}/.ssh/authorized_keys
-               on the VM. SSH in once interactively from your laptop with the same
-               key and append the public key to authorized_keys, then retry.
-            3. The PRIVATE key in OCI_SSH_PRIVATE_KEY is the wrong key (e.g. you
-               generated a new keypair locally but never installed the .pub on the VM).
-            4. /home/${OCI_USER}/.ssh has wrong permissions on the VM. Fix with:
-                 chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && chown -R ${OCI_USER}:${OCI_USER} ~/.ssh
-          HINT
-            exit $rc
+            echo "::error::SSH preflight failed. Common causes:"
+            echo "  1. OCI_USER is wrong. 'opc' = Oracle Linux, 'ubuntu' = Ubuntu."
+            echo "  2. The PUBLIC key printed above is not in ~${OCI_USER}/.ssh/authorized_keys on ${OCI_HOST}."
+            echo "  3. The PRIVATE key in OCI_SSH_PRIVATE_KEY does not match what's installed on the VM."
+            echo "  4. ~${OCI_USER}/.ssh perms are wrong on the VM. Fix:"
+            echo "       chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && chown -R ${OCI_USER}:${OCI_USER} ~/.ssh"
+            exit 1
           fi
 
       - name: Deploy via SSH
