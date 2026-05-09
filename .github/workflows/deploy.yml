@@ -25,6 +25,7 @@ env:
   HUB_PORT: 443
   GATEWAY_PORT: 4444
   PUBLIC_HEALTH_URL: https://api.matrixhub.io/health?check_db=true
+  TLS_HOST_DIR: /etc/ssl/matrixhub
 
 jobs:
   deploy:
@@ -47,6 +48,8 @@ jobs:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_USER: ${{ secrets.OCI_USER }}
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          CF_ORIGIN_CERT: ${{ secrets.CF_ORIGIN_CERT }}
+          CF_ORIGIN_KEY:  ${{ secrets.CF_ORIGIN_KEY }}
         run: |
           set -euo pipefail
 
@@ -62,8 +65,20 @@ jobs:
             echo "  OCI_USER=ubuntu"
             echo "  OCI_SSH_PRIVATE_KEY=<full OpenSSH private key>"
             echo
-            echo "Optional secret:"
+            echo "Optional secrets:"
             echo "  OCI_KNOWN_HOSTS=<ssh-keyscan output>"
+            echo "  CF_ORIGIN_CERT=<full PEM contents of cf-origin.pem>"
+            echo "  CF_ORIGIN_KEY =<full PEM contents of cf-origin.key>"
+            exit 1
+          fi
+
+          # Cert and key must be both-set or both-unset.
+          if [ -n "${CF_ORIGIN_CERT:-}" ] && [ -z "${CF_ORIGIN_KEY:-}" ]; then
+            echo "::error::CF_ORIGIN_CERT is set but CF_ORIGIN_KEY is not. Set both or neither."
+            exit 1
+          fi
+          if [ -z "${CF_ORIGIN_CERT:-}" ] && [ -n "${CF_ORIGIN_KEY:-}" ]; then
+            echo "::error::CF_ORIGIN_KEY is set but CF_ORIGIN_CERT is not. Set both or neither."
             exit 1
           fi
 
@@ -142,20 +157,101 @@ jobs:
           echo "Testing SSH login..."
           ssh oci-prod 'echo "SSH OK"; whoami; hostname; uptime'
 
+      - name: Install Cloudflare Origin Cert on host (if secrets provided)
+        shell: bash
+        env:
+          CF_ORIGIN_CERT: ${{ secrets.CF_ORIGIN_CERT }}
+          CF_ORIGIN_KEY:  ${{ secrets.CF_ORIGIN_KEY }}
+          TLS_HOST_DIR:   ${{ env.TLS_HOST_DIR }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${CF_ORIGIN_CERT:-}" ] || [ -z "${CF_ORIGIN_KEY:-}" ]; then
+            echo "CF_ORIGIN_CERT / CF_ORIGIN_KEY not provided — skipping install."
+            echo "The next step will verify ${TLS_HOST_DIR}/cf-origin.{pem,key} are already present on the VM."
+            exit 0
+          fi
+
+          # Validate locally first — never push a broken cert/key pair to the VM.
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          printf '%s\n' "$CF_ORIGIN_CERT" | tr -d '\r' > "$tmp/cf-origin.pem"
+          printf '%s\n' "$CF_ORIGIN_KEY"  | tr -d '\r' > "$tmp/cf-origin.key"
+
+          # 1. cert is parseable
+          if ! openssl x509 -in "$tmp/cf-origin.pem" -noout -subject -issuer -dates >/dev/null 2>&1; then
+            echo "::error::CF_ORIGIN_CERT is not a parseable X.509 PEM."
+            exit 1
+          fi
+
+          # 2. key is parseable (RSA or EC)
+          if ! openssl pkey -in "$tmp/cf-origin.key" -noout >/dev/null 2>&1; then
+            echo "::error::CF_ORIGIN_KEY is not a parseable PEM private key (or it is passphrase-protected)."
+            exit 1
+          fi
+
+          # 3. cert and key are a matching pair (compare public-key SPKI hashes)
+          cert_hash="$(openssl x509  -in "$tmp/cf-origin.pem" -pubkey -noout 2>/dev/null \
+                       | openssl pkey -pubin -outform DER 2>/dev/null \
+                       | openssl dgst -sha256 -hex | awk '{print $NF}')"
+          key_hash="$(openssl pkey  -in "$tmp/cf-origin.key" -pubout -outform DER 2>/dev/null \
+                       | openssl dgst -sha256 -hex | awk '{print $NF}')"
+          if [ -z "$cert_hash" ] || [ -z "$key_hash" ] || [ "$cert_hash" != "$key_hash" ]; then
+            echo "::error::CF_ORIGIN_CERT and CF_ORIGIN_KEY do NOT match (public-key SPKI mismatch)."
+            echo "  cert pubkey sha256: $cert_hash"
+            echo "  key  pubkey sha256: $key_hash"
+            exit 1
+          fi
+
+          echo "Cert/key pair validated locally:"
+          openssl x509 -in "$tmp/cf-origin.pem" -noout -subject -issuer -dates -fingerprint -sha256 \
+            | sed 's/^/  /'
+          if openssl x509 -in "$tmp/cf-origin.pem" -noout -checkend 604800 >/dev/null 2>&1; then
+            echo "  expires:    in more than 7 days (OK)"
+          else
+            echo "::warning::Cert expires within 7 days (or has already expired). Renew via Cloudflare → SSL/TLS → Origin Server."
+          fi
+
+          echo "Shipping cert + key to ${TLS_HOST_DIR} on the VM..."
+          # Copy to a temp location on the VM the deploy user can write,
+          # then sudo-mv into place with the right owner / mode.
+          scp -i ~/.ssh/oci_key \
+              -o StrictHostKeyChecking=yes \
+              -o IdentitiesOnly=yes \
+              "$tmp/cf-origin.pem" "$tmp/cf-origin.key" \
+              oci-prod:/tmp/
+
+          ssh oci-prod TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'REMOTE'
+          set -euo pipefail
+          DEST="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
+          sudo mkdir -p "$DEST"
+          sudo install -m 0644 -o root -g root /tmp/cf-origin.pem "$DEST/cf-origin.pem"
+          sudo install -m 0640 -o root -g root /tmp/cf-origin.key "$DEST/cf-origin.key"
+          rm -f /tmp/cf-origin.pem /tmp/cf-origin.key
+          echo "Installed:"
+          sudo ls -l "$DEST/cf-origin.pem" "$DEST/cf-origin.key"
+          if command -v openssl >/dev/null; then
+            sudo openssl x509 -in "$DEST/cf-origin.pem" -noout -subject -issuer -dates -fingerprint -sha256 \
+              | sed 's/^/  /'
+          fi
+          REMOTE
+
       - name: Deploy via SSH
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.TAG }}
+          TLS_HOST_DIR: ${{ env.TLS_HOST_DIR }}
         run: |
           set -euo pipefail
 
-          ssh oci-prod TAG="${TAG}" bash -s <<'DEPLOY_SCRIPT'
+          ssh oci-prod TAG="${TAG}" TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
           IMAGE="ruslanmv/matrix-hub"
           TAG="${TAG:-latest}"
           CONTAINER="matrix-hub"
           LEGACY_NAMES=("matrixhub")
+          TLS_DIR="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
 
           echo "=== Host info ==="
           whoami
@@ -186,6 +282,31 @@ jobs:
           fi
 
           echo "=== Using env file: $ENV_FILE ==="
+
+          # ---------------------------------------------------------------
+          # Verify the Cloudflare Origin Cert is on the host. If the
+          # previous "Install Cloudflare Origin Cert" step ran, this is
+          # already true; if it was skipped (no secrets) we expect the
+          # operator to have placed the cert manually.
+          # ---------------------------------------------------------------
+          echo "=== Checking Cloudflare Origin Cert at ${TLS_DIR} ==="
+          if ! sudo test -d "${TLS_DIR}" \
+             || ! sudo test -s "${TLS_DIR}/cf-origin.pem" \
+             || ! sudo test -s "${TLS_DIR}/cf-origin.key"; then
+            echo "::error::Missing TLS material at ${TLS_DIR}/cf-origin.{pem,key}."
+            echo "Either:"
+            echo "  - Set CF_ORIGIN_CERT and CF_ORIGIN_KEY repository secrets so the workflow installs them automatically, OR"
+            echo "  - Install them on the VM manually:"
+            echo "      sudo mkdir -p ${TLS_DIR}"
+            echo "      sudo cp /path/to/cf-origin.pem ${TLS_DIR}/"
+            echo "      sudo cp /path/to/cf-origin.key ${TLS_DIR}/"
+            echo "      sudo chmod 644 ${TLS_DIR}/cf-origin.pem"
+            echo "      sudo chmod 640 ${TLS_DIR}/cf-origin.key"
+            exit 1
+          fi
+          echo "TLS material present:"
+          sudo ls -l "${TLS_DIR}/cf-origin.pem" "${TLS_DIR}/cf-origin.key" \
+            | sed 's/^/  /'
 
           echo "=== Backing up .env ==="
           cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
@@ -282,6 +403,9 @@ jobs:
           fi
 
           echo "=== Starting ${CONTAINER} ==="
+          # The Cloudflare Origin Cert is mounted read-only at the same path
+          # the in-image gunicorn / supervisord expects (matches the manual
+          # ./scripts/run_container.sh setup and matrixhub-db/docs/hub.md).
           docker run -d \
             --name "${CONTAINER}" \
             --restart unless-stopped \
@@ -289,6 +413,7 @@ jobs:
             -p 4444:4444 \
             --env-file "${ENV_FILE}" \
             -v matrixhub_data:/app/data \
+            -v "${TLS_DIR}:/etc/ssl/matrixhub:ro" \
             "${IMAGE}:${TAG}"
 
           echo "=== Waiting for health check ==="
@@ -315,6 +440,20 @@ jobs:
           echo "=== Local health check passed ==="
           curl -ksS "https://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
 
+          echo "=== Verifying TLS on :443 ==="
+          if command -v openssl >/dev/null 2>&1; then
+            if echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername api.matrixhub.io 2>/dev/null \
+                 | grep -qE '^subject='; then
+              echo "TLS handshake on :443 OK"
+              echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername api.matrixhub.io 2>/dev/null \
+                 | grep -E '^(subject|issuer)=' | sed 's/^/  /'
+            else
+              echo "::warning::Container is responding on :443 but not negotiating TLS."
+              echo "Cloudflare will return 525 until the cert is mounted and gunicorn picks it up."
+              docker logs --tail 60 "${CONTAINER}" || true
+            fi
+          fi
+
           echo "=== Cleaning old Docker images ==="
           docker image prune -f || true
 
@@ -338,7 +477,11 @@ jobs:
             echo
           fi
 
-          if [ "$STATUS" != "200" ]; then
+          if [ "$STATUS" = "525" ]; then
+            echo "::error::HTTP 525 — Cloudflare cannot complete TLS handshake to the origin."
+            echo "Confirm the Cloudflare Origin Cert is at ${TLS_HOST_DIR}/cf-origin.{pem,key}"
+            echo "and that the matrix-hub container started with that path mounted."
+          elif [ "$STATUS" != "200" ]; then
             echo "::warning::External health check returned HTTP ${STATUS}."
           fi
 
@@ -353,6 +496,12 @@ jobs:
             echo "- Host: \`${{ secrets.OCI_HOST }}\`"
             echo "- User: \`${{ secrets.OCI_USER }}\`"
             echo "- Container: \`${{ env.CONTAINER_NAME }}\`"
+            echo "- TLS dir on host: \`${{ env.TLS_HOST_DIR }}\` (mounted ro into the container)"
+            if [ -n "${{ secrets.CF_ORIGIN_CERT }}" ] && [ -n "${{ secrets.CF_ORIGIN_KEY }}" ]; then
+              echo "- TLS material managed by workflow (CF_ORIGIN_CERT / CF_ORIGIN_KEY secrets)"
+            else
+              echo "- TLS material managed manually on the VM (no CF_ORIGIN_* secrets set)"
+            fi
             echo "- Health URL: \`${{ env.PUBLIC_HEALTH_URL }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -366,5 +515,8 @@ jobs:
           echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
           echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null || true; docker rm \$n 2>/dev/null || true; done"
           echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
-          echo "    -p 443:443 -p 4444:4444 --env-file ~/matrix-hub/.env \\"
-          echo "    -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
+          echo "    -p 443:443 -p 4444:4444 \\"
+          echo "    --env-file ~/matrix-hub/.env \\"
+          echo "    -v matrixhub_data:/app/data \\"
+          echo "    -v ${{ env.TLS_HOST_DIR }}:/etc/ssl/matrixhub:ro \\"
+          echo "    ${{ env.DOCKER_IMAGE }}:latest"
