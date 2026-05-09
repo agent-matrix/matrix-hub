@@ -84,17 +84,16 @@ RUN find /app -maxdepth 5 \( -name "*.db" -o -name "*.sqlite" -o -name "mcp.db" 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Pre-create the runtime data dir so the named-volume mount inherits the
-# right ownership on first use. Without this, docker creates an empty
-# `matrixhub_data` volume populated from the image, but with root
-# ownership on some hosts — the non-root `app` user then can't write to
-# /app/data/blobs and gunicorn workers crash with PermissionError.
-RUN mkdir -p /app/data/blobs && chown -R app:app /app
-
-# Security: non-root user (created above as part of `chown -R app:app /app`
-# fails without the user existing). Create the user *before* the chown.
+# Create the non-root `app` user, pre-create the runtime data dir, and
+# chown the entire app tree to it — all in one RUN so the chown can't run
+# before the user exists. Pre-creating /app/data/blobs is important: when
+# the deploy mounts an empty `matrixhub_data` named volume here, Docker
+# populates it from the image, preserving uid/gid, so gunicorn workers
+# never hit `PermissionError: '/app/data/blobs'` after a volume reset.
 RUN groupadd --system app && useradd --system -g app --home /app app && \
-    mkdir -p /app/data/blobs && chown -R app:app /app
+    mkdir -p /app/data/blobs && \
+    chown -R app:app /app
+
 USER app
 
 EXPOSE 443 4444
