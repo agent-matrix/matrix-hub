@@ -26,6 +26,12 @@ env:
   GATEWAY_PORT: 4444
   PUBLIC_HEALTH_URL: https://api.matrixhub.io/health?check_db=true
   TLS_HOST_DIR: /etc/ssl/matrixhub
+  # Resource caps for a 1 GB OCI E2.1.Micro instance.
+  # Leave ~100 MB headroom for sshd / systemd / kernel.
+  CONTAINER_MEMORY: 900m
+  CONTAINER_CPUS: "0.9"
+  # Keep this many .env.bak.<ts> files on the VM; older ones are deleted.
+  ENV_BACKUPS_TO_KEEP: 10
 
 jobs:
   deploy:
@@ -72,7 +78,6 @@ jobs:
             exit 1
           fi
 
-          # Cert and key must be both-set or both-unset.
           if [ -n "${CF_ORIGIN_CERT:-}" ] && [ -z "${CF_ORIGIN_KEY:-}" ]; then
             echo "::error::CF_ORIGIN_CERT is set but CF_ORIGIN_KEY is not. Set both or neither."
             exit 1
@@ -172,25 +177,23 @@ jobs:
             exit 0
           fi
 
-          # Validate locally first — never push a broken cert/key pair to the VM.
+          # Validate locally first — never push a broken pair to the VM.
           tmp="$(mktemp -d)"
           trap 'rm -rf "$tmp"' EXIT
           printf '%s\n' "$CF_ORIGIN_CERT" | tr -d '\r' > "$tmp/cf-origin.pem"
           printf '%s\n' "$CF_ORIGIN_KEY"  | tr -d '\r' > "$tmp/cf-origin.key"
 
-          # 1. cert is parseable
           if ! openssl x509 -in "$tmp/cf-origin.pem" -noout -subject -issuer -dates >/dev/null 2>&1; then
             echo "::error::CF_ORIGIN_CERT is not a parseable X.509 PEM."
             exit 1
           fi
 
-          # 2. key is parseable (RSA or EC)
           if ! openssl pkey -in "$tmp/cf-origin.key" -noout >/dev/null 2>&1; then
             echo "::error::CF_ORIGIN_KEY is not a parseable PEM private key (or it is passphrase-protected)."
             exit 1
           fi
 
-          # 3. cert and key are a matching pair (compare public-key SPKI hashes)
+          # SPKI-hash match: works for both RSA and ECDSA Origin Certs.
           cert_hash="$(openssl x509  -in "$tmp/cf-origin.pem" -pubkey -noout 2>/dev/null \
                        | openssl pkey -pubin -outform DER 2>/dev/null \
                        | openssl dgst -sha256 -hex | awk '{print $NF}')"
@@ -209,24 +212,31 @@ jobs:
           if openssl x509 -in "$tmp/cf-origin.pem" -noout -checkend 604800 >/dev/null 2>&1; then
             echo "  expires:    in more than 7 days (OK)"
           else
-            echo "::warning::Cert expires within 7 days (or has already expired). Renew via Cloudflare → SSL/TLS → Origin Server."
+            echo "::warning::Cert expires within 7 days (or already has). Renew via Cloudflare → SSL/TLS → Origin Server."
           fi
 
           echo "Shipping cert + key to ${TLS_HOST_DIR} on the VM..."
-          # Copy to a temp location on the VM the deploy user can write,
-          # then sudo-mv into place with the right owner / mode.
           scp -i ~/.ssh/oci_key \
               -o StrictHostKeyChecking=yes \
               -o IdentitiesOnly=yes \
               "$tmp/cf-origin.pem" "$tmp/cf-origin.key" \
               oci-prod:/tmp/
 
+          # NOTE on permissions:
+          # The matrix-hub image runs gunicorn as a non-root user (USER app
+          # in the Dockerfile, uid 1001). With 0640 root:root on the key,
+          # that container user can't read it and gunicorn falls back to
+          # plaintext on :443 → Cloudflare 525. So we use 0644 root:root
+          # for BOTH cert and key (matches the canonical
+          # scripts/install_certificate.sh, with the comment "tighten later
+          # if you run TLS as root inside the container"). The key is still
+          # mounted read-only into the container.
           ssh oci-prod TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'REMOTE'
           set -euo pipefail
           DEST="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
           sudo mkdir -p "$DEST"
           sudo install -m 0644 -o root -g root /tmp/cf-origin.pem "$DEST/cf-origin.pem"
-          sudo install -m 0640 -o root -g root /tmp/cf-origin.key "$DEST/cf-origin.key"
+          sudo install -m 0644 -o root -g root /tmp/cf-origin.key "$DEST/cf-origin.key"
           rm -f /tmp/cf-origin.pem /tmp/cf-origin.key
           echo "Installed:"
           sudo ls -l "$DEST/cf-origin.pem" "$DEST/cf-origin.key"
@@ -241,10 +251,19 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.TAG }}
           TLS_HOST_DIR: ${{ env.TLS_HOST_DIR }}
+          CONTAINER_MEMORY: ${{ env.CONTAINER_MEMORY }}
+          CONTAINER_CPUS: ${{ env.CONTAINER_CPUS }}
+          ENV_BACKUPS_TO_KEEP: ${{ env.ENV_BACKUPS_TO_KEEP }}
         run: |
           set -euo pipefail
 
-          ssh oci-prod TAG="${TAG}" TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'DEPLOY_SCRIPT'
+          ssh oci-prod \
+              TAG="${TAG}" \
+              TLS_HOST_DIR="${TLS_HOST_DIR}" \
+              CONTAINER_MEMORY="${CONTAINER_MEMORY}" \
+              CONTAINER_CPUS="${CONTAINER_CPUS}" \
+              ENV_BACKUPS_TO_KEEP="${ENV_BACKUPS_TO_KEEP}" \
+              bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
           IMAGE="ruslanmv/matrix-hub"
@@ -252,15 +271,17 @@ jobs:
           CONTAINER="matrix-hub"
           LEGACY_NAMES=("matrixhub")
           TLS_DIR="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
+          MEM="${CONTAINER_MEMORY:-900m}"
+          CPUS="${CONTAINER_CPUS:-0.9}"
+          KEEP_BACKUPS="${ENV_BACKUPS_TO_KEEP:-10}"
 
           echo "=== Host info ==="
-          whoami
-          hostname
-          uptime
+          whoami; hostname; uptime
+          echo "Free memory:"
+          free -h | sed 's/^/  /'
 
           echo "=== Detecting env file ==="
           ENV_FILE=""
-
           for candidate in \
             "${HOME}/matrix-hub/.env" \
             "/home/ubuntu/matrix-hub/.env" \
@@ -280,39 +301,35 @@ jobs:
             echo "  /home/opc/matrix-hub/.env" >&2
             exit 1
           fi
-
           echo "=== Using env file: $ENV_FILE ==="
 
-          # ---------------------------------------------------------------
-          # Verify the Cloudflare Origin Cert is on the host. If the
-          # previous "Install Cloudflare Origin Cert" step ran, this is
-          # already true; if it was skipped (no secrets) we expect the
-          # operator to have placed the cert manually.
-          # ---------------------------------------------------------------
           echo "=== Checking Cloudflare Origin Cert at ${TLS_DIR} ==="
           if ! sudo test -d "${TLS_DIR}" \
              || ! sudo test -s "${TLS_DIR}/cf-origin.pem" \
              || ! sudo test -s "${TLS_DIR}/cf-origin.key"; then
             echo "::error::Missing TLS material at ${TLS_DIR}/cf-origin.{pem,key}."
-            echo "Either:"
-            echo "  - Set CF_ORIGIN_CERT and CF_ORIGIN_KEY repository secrets so the workflow installs them automatically, OR"
-            echo "  - Install them on the VM manually:"
-            echo "      sudo mkdir -p ${TLS_DIR}"
-            echo "      sudo cp /path/to/cf-origin.pem ${TLS_DIR}/"
-            echo "      sudo cp /path/to/cf-origin.key ${TLS_DIR}/"
-            echo "      sudo chmod 644 ${TLS_DIR}/cf-origin.pem"
-            echo "      sudo chmod 640 ${TLS_DIR}/cf-origin.key"
+            echo "Either set CF_ORIGIN_CERT and CF_ORIGIN_KEY repo secrets, or"
+            echo "place the files manually on the VM at ${TLS_DIR}/."
             exit 1
           fi
           echo "TLS material present:"
           sudo ls -l "${TLS_DIR}/cf-origin.pem" "${TLS_DIR}/cf-origin.key" \
             | sed 's/^/  /'
 
-          echo "=== Backing up .env ==="
+          echo "=== Backing up .env (keeping last ${KEEP_BACKUPS}) ==="
+          ENV_DIR="$(dirname "$ENV_FILE")"
+          ENV_BASE="$(basename "$ENV_FILE")"
           cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+          # Rotate: keep the newest ${KEEP_BACKUPS}, delete older ones.
+          ls -1tr "${ENV_DIR}/${ENV_BASE}.bak."* 2>/dev/null \
+            | head -n -"${KEEP_BACKUPS}" \
+            | xargs -r rm -f
+          echo "Backups in ${ENV_DIR}:"
+          ls -1t "${ENV_DIR}/${ENV_BASE}.bak."* 2>/dev/null \
+            | head -n "${KEEP_BACKUPS}" \
+            | sed 's/^/  /' || true
 
           echo "=== Normalizing .env values for Docker --env-file ==="
-
           sed -i \
             -e 's/^SEARCH_LEXICAL_BACKEND=.*/SEARCH_LEXICAL_BACKEND=none/' \
             -e 's/^SEARCH_VECTOR_BACKEND=.*/SEARCH_VECTOR_BACKEND=none/' \
@@ -348,13 +365,10 @@ jobs:
               key, sep, value = line.partition("=")
               value_lstrip = value.lstrip()
 
-              # Keep JSON/list/quoted values unchanged.
               if value_lstrip.startswith(('"', "'", "[", "{")):
                   cleaned.append(line)
                   continue
 
-              # Docker --env-file does not remove inline comments.
-              # Strip only comments introduced by whitespace + #.
               value = re.sub(r"\s+#.*$", "", value).rstrip()
               cleaned.append(f"{key}{sep}{value}")
 
@@ -372,7 +386,7 @@ jobs:
             if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
               echo "Stopping/removing $name"
               docker stop "$name" >/dev/null 2>&1 || true
-              docker rm "$name" >/dev/null 2>&1 || true
+              docker rm   "$name" >/dev/null 2>&1 || true
             fi
           done
 
@@ -381,14 +395,13 @@ jobs:
             docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' \
               | awk '/(:|->)443\/tcp|->4444\/tcp/ {print $1, $2}'
           )
-
           if [ "${#holders[@]}" -gt 0 ]; then
             for line in "${holders[@]}"; do
               id="${line%% *}"
               name="${line#* }"
               echo "Stopping/removing $name ($id)"
               docker stop "$id" >/dev/null 2>&1 || true
-              docker rm "$id" >/dev/null 2>&1 || true
+              docker rm   "$id" >/dev/null 2>&1 || true
             done
           else
             echo "No running Docker container is holding :443 or :4444."
@@ -402,42 +415,64 @@ jobs:
             fi
           fi
 
-          echo "=== Starting ${CONTAINER} ==="
-          # The Cloudflare Origin Cert is mounted read-only at the same path
-          # the in-image gunicorn / supervisord expects (matches the manual
-          # ./scripts/run_container.sh setup and matrixhub-db/docs/hub.md).
+          echo "=== Starting ${CONTAINER} (memory=${MEM}, cpus=${CPUS}) ==="
+          # Resource caps prevent a runaway container from OOM-killing the
+          # host on a 1 GB VM.Standard.E2.1.Micro. Tune via the workflow
+          # env CONTAINER_MEMORY / CONTAINER_CPUS.
           docker run -d \
             --name "${CONTAINER}" \
             --restart unless-stopped \
             -p 443:443 \
             -p 4444:4444 \
+            --memory "${MEM}" \
+            --memory-swap "${MEM}" \
+            --cpus "${CPUS}" \
+            --log-driver json-file \
+            --log-opt max-size=10m \
+            --log-opt max-file=3 \
             --env-file "${ENV_FILE}" \
             -v matrixhub_data:/app/data \
             -v "${TLS_DIR}:/etc/ssl/matrixhub:ro" \
             "${IMAGE}:${TAG}"
 
-          echo "=== Waiting for health check ==="
+          echo "=== Waiting for Docker HEALTHCHECK to report 'healthy' ==="
+          # Prefer the image's HEALTHCHECK over a single curl probe — the
+          # Dockerfile already runs it on a 30s schedule and accounts for
+          # warmup. Fall back to curl if the image has no healthcheck.
+          HAS_HC="$(docker inspect -f '{{if .State.Health}}true{{else}}false{{end}}' "${CONTAINER}" 2>/dev/null || echo false)"
           RETRIES=0
-          MAX_RETRIES=45
+          MAX_RETRIES=60   # ~3 minutes total
 
-          until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1 \
-             || curl -ksS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
-            RETRIES=$((RETRIES + 1))
+          if [ "${HAS_HC}" = "true" ]; then
+            until [ "$(docker inspect -f '{{.State.Health.Status}}' "${CONTAINER}" 2>/dev/null)" = "healthy" ]; do
+              status="$(docker inspect -f '{{.State.Health.Status}}' "${CONTAINER}" 2>/dev/null || echo none)"
+              RETRIES=$((RETRIES + 1))
+              if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+                echo "ERROR: container did not become healthy (last: ${status})."
+                docker ps -a || true
+                docker logs --tail 200 "${CONTAINER}" || true
+                exit 1
+              fi
+              echo "Waiting... (${RETRIES}/${MAX_RETRIES}) status=${status}"
+              sleep 3
+            done
+            echo "Container HEALTHCHECK reports: healthy"
+          else
+            until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1 \
+               || curl -ksS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
+              RETRIES=$((RETRIES + 1))
+              if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
+                echo "ERROR: health check failed after ${MAX_RETRIES} attempts."
+                docker ps -a || true
+                docker logs --tail 200 "${CONTAINER}" || true
+                exit 1
+              fi
+              echo "Waiting... (${RETRIES}/${MAX_RETRIES})"
+              sleep 3
+            done
+          fi
 
-            if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-              echo "ERROR: health check failed after ${MAX_RETRIES} attempts."
-              echo "=== Container status ==="
-              docker ps -a || true
-              echo "=== Container logs ==="
-              docker logs --tail 150 "${CONTAINER}" || true
-              exit 1
-            fi
-
-            echo "Waiting... (${RETRIES}/${MAX_RETRIES})"
-            sleep 2
-          done
-
-          echo "=== Local health check passed ==="
+          echo "=== Local /health?check_db=true ==="
           curl -ksS "https://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
 
           echo "=== Verifying TLS on :443 ==="
@@ -449,10 +484,13 @@ jobs:
                  | grep -E '^(subject|issuer)=' | sed 's/^/  /'
             else
               echo "::warning::Container is responding on :443 but not negotiating TLS."
-              echo "Cloudflare will return 525 until the cert is mounted and gunicorn picks it up."
               docker logs --tail 60 "${CONTAINER}" || true
             fi
           fi
+
+          echo "=== Resource usage after start ==="
+          docker stats --no-stream "${CONTAINER}" 2>/dev/null \
+            | sed 's/^/  /' || true
 
           echo "=== Cleaning old Docker images ==="
           docker image prune -f || true
@@ -495,7 +533,7 @@ jobs:
             echo "- Image: \`${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG || 'latest' }}\`"
             echo "- Host: \`${{ secrets.OCI_HOST }}\`"
             echo "- User: \`${{ secrets.OCI_USER }}\`"
-            echo "- Container: \`${{ env.CONTAINER_NAME }}\`"
+            echo "- Container: \`${{ env.CONTAINER_NAME }}\` (memory=${{ env.CONTAINER_MEMORY }}, cpus=${{ env.CONTAINER_CPUS }})"
             echo "- TLS dir on host: \`${{ env.TLS_HOST_DIR }}\` (mounted ro into the container)"
             if [ -n "${{ secrets.CF_ORIGIN_CERT }}" ] && [ -n "${{ secrets.CF_ORIGIN_KEY }}" ]; then
               echo "- TLS material managed by workflow (CF_ORIGIN_CERT / CF_ORIGIN_KEY secrets)"
@@ -516,6 +554,8 @@ jobs:
           echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null || true; docker rm \$n 2>/dev/null || true; done"
           echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
           echo "    -p 443:443 -p 4444:4444 \\"
+          echo "    --memory ${{ env.CONTAINER_MEMORY }} --memory-swap ${{ env.CONTAINER_MEMORY }} --cpus ${{ env.CONTAINER_CPUS }} \\"
+          echo "    --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \\"
           echo "    --env-file ~/matrix-hub/.env \\"
           echo "    -v matrixhub_data:/app/data \\"
           echo "    -v ${{ env.TLS_HOST_DIR }}:/etc/ssl/matrixhub:ro \\"
