@@ -1,0 +1,229 @@
+name: "Switch Hub to Aiven"
+
+# One-click cutover for the matrix-hub container running on the OCI VM:
+#   1. SSH into the host
+#   2. back up the existing /home/<user>/matrix-hub/.env
+#   3. upsert DATABASE_URL_PRIMARY (and optional DATABASE_URL_FALLBACK)
+#   4. recreate the matrix-hub container so it picks up the new env
+#   5. probe https://127.0.0.1:443/health?check_db=true and assert db:"ok"
+#
+# This is the workflow you click after running "Aiven bootstrap" in
+# matrixhub-db so the front-end's /status page flips to:
+#   API:      Operational
+#   Database: Connected
+#
+# Required secrets:
+#   OCI_HOST                 public IP of the Hub VM
+#   OCI_SSH_PRIVATE_KEY      deploy private key (PEM)
+#   AIVEN_DATABASE_URL       postgresql://avnadmin:PW@…/defaultdb?sslmode=require
+#                            (libpq form is fine; we normalise to postgresql+psycopg://)
+#
+# Optional secrets / variables:
+#   OCI_USER                 default 'opc' (use 'ubuntu' for Ubuntu hosts)
+#   OCI_KNOWN_HOSTS          ssh-keyscan output for OCI_HOST; if absent we keyscan
+#   FALLBACK_DATABASE_URL    DATABASE_URL_FALLBACK to keep OL9 wired
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_fallback:
+        description: 'Also write DATABASE_URL_FALLBACK from the FALLBACK_DATABASE_URL secret? (true/false)'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+      restart_container:
+        description: 'Recreate the matrix-hub container after updating .env? (true/false)'
+        required: false
+        default: 'true'
+        type: choice
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: switch-hub-to-aiven
+  cancel-in-progress: false
+
+jobs:
+  switch:
+    name: SSH → upsert .env → restart
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Verify required secrets
+        shell: bash
+        env:
+          OCI_HOST:            ${{ secrets.OCI_HOST }}
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          AIVEN_DATABASE_URL:  ${{ secrets.AIVEN_DATABASE_URL }}
+        run: |
+          missing=()
+          [ -n "$OCI_HOST"            ] || missing+=(OCI_HOST)
+          [ -n "$OCI_SSH_PRIVATE_KEY" ] || missing+=(OCI_SSH_PRIVATE_KEY)
+          [ -n "$AIVEN_DATABASE_URL"  ] || missing+=(AIVEN_DATABASE_URL)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            exit 1
+          fi
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          KEY:      ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          KNOWN:    ${{ secrets.OCI_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/id_deploy && chmod 600 ~/.ssh/id_deploy
+          if [ -n "$KNOWN" ]; then
+            printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H -T 10 "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null || true
+            [ -s ~/.ssh/known_hosts ] || { echo "::error::ssh-keyscan failed for $OCI_HOST"; exit 1; }
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Upsert DATABASE_URL_PRIMARY in .env on host, then restart
+        shell: bash
+        env:
+          OCI_HOST:           ${{ secrets.OCI_HOST }}
+          OCI_USER:           ${{ secrets.OCI_USER || 'opc' }}
+          AIVEN_URL_RAW:      ${{ secrets.AIVEN_DATABASE_URL }}
+          FALLBACK_URL_RAW:   ${{ secrets.FALLBACK_DATABASE_URL }}
+          KEEP_FALLBACK:      ${{ inputs.keep_fallback }}
+          RESTART_CONTAINER:  ${{ inputs.restart_container }}
+          CONTAINER_NAME:     matrix-hub
+        run: |
+          set -euo pipefail
+          # Normalise to SQLAlchemy psycopg form expected by matrix-hub
+          to_sqla() {
+            python3 -c '
+import sys, re
+u = sys.argv[1]
+u = re.sub(r"^postgres://", "postgresql://", u)
+u = re.sub(r"^postgresql\+(psycopg|asyncpg)://", "postgresql+psycopg://", u)
+if not u.startswith("postgresql+psycopg://"):
+    u = u.replace("postgresql://", "postgresql+psycopg://", 1)
+print(u)
+' "$1"
+          }
+          PRIMARY_SQLA="$(to_sqla "$AIVEN_URL_RAW")"
+          FALLBACK_SQLA=""
+          [ "$KEEP_FALLBACK" = "true" ] && [ -n "$FALLBACK_URL_RAW" ] \
+            && FALLBACK_SQLA="$(to_sqla "$FALLBACK_URL_RAW")" || true
+
+          # Send vars over SSH; remote side does the file edit
+          ssh -i ~/.ssh/id_deploy \
+              -o StrictHostKeyChecking=yes \
+              -o IdentitiesOnly=yes \
+              -o ConnectTimeout=15 \
+              "${OCI_USER}@${OCI_HOST}" \
+              env PRIMARY_SQLA="$PRIMARY_SQLA" \
+                  FALLBACK_SQLA="$FALLBACK_SQLA" \
+                  RESTART_CONTAINER="$RESTART_CONTAINER" \
+                  CONTAINER_NAME="$CONTAINER_NAME" \
+                  bash -s <<'REMOTE'
+          set -euo pipefail
+
+          # Locate the .env (works on both Ubuntu and OL9)
+          for c in "$HOME/matrix-hub/.env" "/home/opc/matrix-hub/.env" "/home/ubuntu/matrix-hub/.env"; do
+            [ -f "$c" ] && { ENV_FILE="$c"; break; }
+          done
+          ENV_FILE="${ENV_FILE:-$HOME/matrix-hub/.env}"
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "ERROR: no .env found at standard paths." >&2
+            exit 1
+          fi
+          echo "Using .env at $ENV_FILE"
+
+          # Backup
+          cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
+
+          upsert() {
+            local file="$1" key="$2" value="$3"
+            if grep -qE "^${key}=" "$file"; then
+              # Use # as sed delimiter (URL has /)
+              sed -i "s#^${key}=.*#${key}=${value//#/\\#}#" "$file"
+            else
+              printf '\n%s=%s\n' "$key" "$value" >> "$file"
+            fi
+          }
+
+          upsert "$ENV_FILE" DATABASE_URL_PRIMARY "$PRIMARY_SQLA"
+          # If a single explicit DATABASE_URL exists, comment it so the selector wins.
+          if grep -qE '^DATABASE_URL=' "$ENV_FILE"; then
+            sed -i 's#^DATABASE_URL=#\# DATABASE_URL (commented by Switch Hub to Aiven workflow): &#' "$ENV_FILE"
+          fi
+          if [ -n "$FALLBACK_SQLA" ]; then
+            upsert "$ENV_FILE" DATABASE_URL_FALLBACK "$FALLBACK_SQLA"
+          fi
+
+          # Print masked diff for the operator
+          echo "--- updated lines (passwords masked) ---"
+          grep -E '^(DATABASE_URL|DATABASE_URL_PRIMARY|DATABASE_URL_FALLBACK)=' "$ENV_FILE" \
+            | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#'
+
+          if [ "${RESTART_CONTAINER}" = "true" ]; then
+            echo "--- restarting container ${CONTAINER_NAME} ---"
+            docker stop "${CONTAINER_NAME}" 2>/dev/null || true
+            docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
+            # Re-run the official runner if present, else fall back to a minimal docker run
+            if [ -x "$HOME/matrix-hub/scripts/run_container.sh" ]; then
+              cd "$HOME/matrix-hub" && bash scripts/run_container.sh
+            else
+              docker run -d \
+                --name "${CONTAINER_NAME}" \
+                --restart unless-stopped \
+                -p 443:443 -p 4444:4444 \
+                --env-file "$ENV_FILE" \
+                -v matrixhub_data:/app/data \
+                ruslanmv/matrix-hub:latest
+            fi
+            echo "--- waiting for /health?check_db=true ---"
+            for i in $(seq 1 60); do
+              code="$(curl -ksS -o /tmp/h.json -w '%{http_code}' --max-time 5 https://127.0.0.1:443/health?check_db=true || echo 000)"
+              body="$(head -c 200 /tmp/h.json 2>/dev/null || true)"
+              echo "  attempt $i: HTTP $code  $body"
+              if [ "$code" = "200" ] && echo "$body" | grep -q '"db"[[:space:]]*:[[:space:]]*"ok"'; then
+                echo "OK"; break
+              fi
+              sleep 5
+            done
+            if ! echo "${body:-}" | grep -q '"db"[[:space:]]*:[[:space:]]*"ok"'; then
+              echo "::warning::Hub did not report db:\"ok\" within 5 minutes — see docker logs matrix-hub"
+              docker logs --tail 80 "${CONTAINER_NAME}" || true
+            fi
+          else
+            echo "RESTART_CONTAINER=false — leaving the running container untouched. Restart manually:"
+            echo "  docker stop ${CONTAINER_NAME} && docker rm ${CONTAINER_NAME} && bash scripts/run_container.sh"
+          fi
+          REMOTE
+
+      - name: External smoke
+        if: always()
+        shell: bash
+        run: |
+          sleep 8
+          status=$(curl -sS -o /tmp/h.json -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health?check_db=true" || echo 000)
+          body=$(head -c 400 /tmp/h.json 2>/dev/null || true)
+          echo "https://api.matrixhub.io/health?check_db=true → HTTP $status"
+          echo "  body: $body"
+          {
+            echo "## Switch Hub to Aiven"
+            echo "- public /health?check_db=true → \`HTTP $status\`"
+            echo "- body: \`${body}\`"
+            if echo "$body" | grep -q '"db"[[:space:]]*:[[:space:]]*"ok"'; then
+              echo
+              echo ":white_check_mark: The Hub is now reading from Aiven. The front-end /status page will go green within seconds (it auto-refreshes on page reload)."
+            else
+              echo
+              echo ":warning: Hub is not yet reporting db:\`ok\`. Possible causes:"
+              echo "  - matrix-hub container did not pick up the new env (rebuild needed)"
+              echo "  - Aiven IP allowlist blocks the Hub VM's egress"
+              echo "  - psql client missing inside the container — Dockerfile must include postgresql-client"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
