@@ -1,0 +1,136 @@
+name: Deploy to server
+
+# Triggers a remote update on the OCI VM whenever a GitHub Release is
+# published. Manual dispatch is also supported for ad-hoc redeploys.
+#
+# Required repository secrets:
+#   DEPLOY_HOST          public IP or DNS of the target VM
+#   DEPLOY_USER          ssh user (ubuntu / opc)
+#   DEPLOY_SSH_KEY       full contents of the private key (PEM)
+#   DEPLOY_KNOWN_HOSTS   output of `ssh-keyscan -H <DEPLOY_HOST>`
+#
+# Optional repository variables:
+#   DEPLOY_PATH          working directory on the VM (default: ~/matrix-hub)
+#   UPDATE_SCRIPT        update script to invoke (default: scripts/update.sh)
+#   PROBE_URL            public URL to smoke-check after deploy
+#
+# Optional repository variable to disable without deleting the file:
+#   DISABLE_DEPLOY=true
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to deploy (e.g. v0.1.8). Defaults to latest."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-server
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: SSH update
+    runs-on: ubuntu-latest
+    if: ${{ vars.DISABLE_DEPLOY != 'true' }}
+    timeout-minutes: 25
+
+    steps:
+      - name: Verify required secrets
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          missing=()
+          [ -n "$DEPLOY_HOST"        ] || missing+=(DEPLOY_HOST)
+          [ -n "$DEPLOY_USER"        ] || missing+=(DEPLOY_USER)
+          [ -n "$DEPLOY_SSH_KEY"     ] || missing+=(DEPLOY_SSH_KEY)
+          [ -n "$DEPLOY_KNOWN_HOSTS" ] || missing+=(DEPLOY_KNOWN_HOSTS)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            echo "Add them in Settings → Secrets and variables → Actions, or set repo variable DISABLE_DEPLOY=true to silence this workflow."
+            exit 1
+          fi
+
+      - name: Determine target tag
+        id: target
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            TAG="${{ github.event.release.tag_name }}"
+          elif [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG=""   # let update.sh default to latest
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Resolved deploy tag: '${TAG:-(latest)}'"
+
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_KEY:  ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN:    ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          printf '%s\n' "$KNOWN"  > ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
+
+      - name: Run update on the server
+        shell: bash
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '~/matrix-hub' }}
+          UPDATE_SCRIPT: ${{ vars.UPDATE_SCRIPT || 'scripts/update.sh' }}
+          TARGET_TAG: ${{ steps.target.outputs.tag }}
+        run: |
+          set -euo pipefail
+          echo "→ ssh ${DEPLOY_USER}@${DEPLOY_HOST}  cd ${DEPLOY_PATH}  TARGET_TAG=${TARGET_TAG:-<latest>}"
+          ssh -i ~/.ssh/id_deploy \
+              -o StrictHostKeyChecking=yes \
+              -o IdentitiesOnly=yes \
+              -o ConnectTimeout=15 \
+              "${DEPLOY_USER}@${DEPLOY_HOST}" \
+              bash -lc "'cd ${DEPLOY_PATH} && git fetch --tags --prune && AUTO=1 TARGET_TAG=\"${TARGET_TAG}\" bash ${UPDATE_SCRIPT}'"
+
+      - name: Smoke test
+        shell: bash
+        env:
+          PROBE_URL: ${{ vars.PROBE_URL || 'https://api.matrixhub.io/health?check_db=true' }}
+        run: |
+          echo "Waiting 10s for the new container to settle…"
+          sleep 10
+          status=$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 15 "$PROBE_URL" || echo 000)
+          echo "Probe $PROBE_URL → HTTP $status"
+          head -c 400 /tmp/health.json || true
+          if [ "$status" != "200" ]; then
+            echo "::warning::Smoke probe returned HTTP $status (server may still be warming up; check /status manually)"
+          fi
+
+      - name: Summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## Server deploy"
+            echo
+            echo "- Trigger: \`${{ github.event_name }}\`"
+            echo "- Tag:     \`${{ steps.target.outputs.tag || '(latest)' }}\`"
+            echo "- Host:    \`${{ secrets.DEPLOY_HOST }}\`"
+            echo "- User:    \`${{ secrets.DEPLOY_USER }}\`"
+            echo "- Path:    \`${{ vars.DEPLOY_PATH || '~/matrix-hub' }}\`"
+            echo "- Script:  \`${{ vars.UPDATE_SCRIPT || 'scripts/update.sh' }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
