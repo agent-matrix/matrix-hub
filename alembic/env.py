@@ -41,13 +41,14 @@ if config.config_file_name is not None:
 # Set the target metadata for 'autogenerate' support.
 target_metadata = Base.metadata
 
-# DEBUG: print loaded metadata tables to verify model detection
-#print("Loaded tables:", Base.metadata.tables)
-
-# If alembic.ini does not define sqlalchemy.url, set it from settings
-if not config.get_main_option("sqlalchemy.url"):
-    # settings.DATABASE_URL should be set via env or defaults
-    config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
+# Always prefer the runtime DATABASE_URL over whatever alembic.ini ships.
+# The shipped alembic.ini has a SQLite default for local development
+# (`sqlite:///./data/catalog.sqlite`); production deployments must migrate
+# the database the application actually connects to (e.g. Aiven Postgres).
+# Without this override, Alembic ran against the local SQLite file while
+# the live app was talking to Postgres, which manifested as
+# `Context impl SQLiteImpl` log lines and missing migrations on the real DB.
+config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)
 
 
 def run_migrations_offline() -> None:
