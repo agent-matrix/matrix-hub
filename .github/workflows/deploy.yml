@@ -83,7 +83,8 @@ jobs:
             echo "  OCI_KNOWN_HOSTS=<ssh-keyscan output>"
             echo "  CF_ORIGIN_CERT=<full PEM contents of cf-origin.pem>"
             echo "  CF_ORIGIN_KEY =<full PEM contents of cf-origin.key>"
-            echo "  AIVEN_DATABASE_URL=postgresql+psycopg://avnadmin:<PW>@pg-37455d5-matrixhub-db.c.aivencloud.com:24870/defaultdb?sslmode=require"
+            echo "  AIVEN_DATABASE_URL=postgres://avnadmin:<PW>@pg-37455d5-matrixhub-db.c.aivencloud.com:24870/defaultdb?sslmode=require"
+            echo "    (any of postgres://, postgresql://, or postgresql+psycopg:// is accepted; the deploy auto-converts)"
             exit 1
           fi
 
@@ -96,17 +97,19 @@ jobs:
             exit 1
           fi
 
-          # Defensive sanity check on the DB URL scheme. SQLAlchemy needs the
-          # driver-prefixed form; a raw postgres:// URL works at the psql CLI
-          # but blows up with "Can't load plugin" in this app.
+          # Sanity check on the AIVEN_DATABASE_URL scheme. The libpq forms
+          # (postgres://, postgresql://) are what Aiven's UI and most secret
+          # managers paste, but SQLAlchemy + psycopg3 need the
+          # driver-prefixed form (postgresql+psycopg://). We accept all
+          # three here and AUTO-CONVERT to the SQLAlchemy form during
+          # deploy — so this step only warns, it does NOT fail.
           if [ -n "${AIVEN_DATABASE_URL:-}" ]; then
             case "$AIVEN_DATABASE_URL" in
               postgresql+psycopg://*|postgresql+asyncpg://*)
-                echo "AIVEN_DATABASE_URL scheme looks correct."
+                echo "AIVEN_DATABASE_URL scheme looks correct (SQLAlchemy form)."
                 ;;
               postgres://*|postgresql://*)
-                echo "::error::AIVEN_DATABASE_URL must use postgresql+psycopg:// (this app is SQLAlchemy/psycopg3). Got: ${AIVEN_DATABASE_URL%%:*}://..."
-                exit 1
+                echo "::notice::AIVEN_DATABASE_URL uses the libpq scheme '${AIVEN_DATABASE_URL%%:*}://' — will be auto-converted to 'postgresql+psycopg://' before reaching the app."
                 ;;
               *)
                 echo "::warning::AIVEN_DATABASE_URL has an unusual scheme; will be applied verbatim."
@@ -375,6 +378,25 @@ jobs:
           # still consumes DATABASE_URL_PRIMARY/FALLBACK if you later split
           # them out — for now we just write the canonical one.
           if [ -n "${AIVEN_DATABASE_URL:-}" ]; then
+            # Auto-convert libpq scheme → SQLAlchemy scheme so the operator
+            # can paste either form into the AIVEN_DATABASE_URL secret. The
+            # app uses SQLAlchemy + psycopg3, which require the
+            # `postgresql+psycopg://` prefix. Aiven's connection-string field
+            # gives you `postgres://`; the `psql` CLI also accepts
+            # `postgresql://`. Normalise here so the .env always ends up
+            # with the form the app actually needs.
+            case "$AIVEN_DATABASE_URL" in
+              postgresql+*) ;;  # already SQLAlchemy form, leave alone
+              postgres://*)
+                echo "Auto-converting libpq scheme 'postgres://' → 'postgresql+psycopg://'."
+                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgres://}"
+                ;;
+              postgresql://*)
+                echo "Auto-converting libpq scheme 'postgresql://' → 'postgresql+psycopg://'."
+                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgresql://}"
+                ;;
+            esac
+
             # Use a `|` delimiter for sed so we don't have to escape the
             # `/`, `:`, `@`, `?`, `=`, or `&` characters that postgres URLs
             # love to contain. The URL itself must not contain `|`.
