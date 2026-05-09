@@ -95,9 +95,6 @@ jobs:
           printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/oci_key
           chmod 600 ~/.ssh/oci_key
 
-          # Validate private key format and derive the matching public key
-          # so the operator can paste it into ~user/.ssh/authorized_keys on
-          # the VM if missing. The private key is never printed.
           ssh-keygen -y -f ~/.ssh/oci_key > ~/.ssh/oci_key.pub || {
             echo "::error::OCI_SSH_PRIVATE_KEY is not a valid private key, or it is passphrase-protected."
             exit 1
@@ -161,6 +158,9 @@ jobs:
           IMAGE="ruslanmv/matrix-hub"
           TAG="${TAG:-latest}"
           CONTAINER="matrix-hub"
+          # Legacy / alternative names that may already be holding our ports
+          # from a previous setup. Stop them too so 443/4444 free up.
+          LEGACY_NAMES=("matrixhub")
 
           # Detect where the .env lives — it depends on the OS / user
           for candidate in \
@@ -182,9 +182,53 @@ jobs:
           echo "=== Pulling ${IMAGE}:${TAG} ==="
           docker pull "${IMAGE}:${TAG}"
 
-          echo "=== Stopping current container ==="
-          docker stop "${CONTAINER}" 2>/dev/null || true
-          docker rm "${CONTAINER}" 2>/dev/null || true
+          # ---------------------------------------------------------------
+          # Free ports 443 and 4444 BEFORE docker run.
+          # The previous failure was:
+          #   "Bind for 0.0.0.0:443 failed: port is already allocated"
+          # because a container under a different name (e.g. 'matrixhub'
+          # without the hyphen) was still bound. Stop+rm any container
+          # publishing those ports, plus any that match our canonical or
+          # legacy names.
+          # ---------------------------------------------------------------
+          echo "=== Stopping any container holding our canonical/legacy names ==="
+          for n in "$CONTAINER" "${LEGACY_NAMES[@]}"; do
+            if docker ps -a --format '{{.Names}}' | grep -qx "$n"; then
+              echo "  stop+rm $n"
+              docker stop "$n" >/dev/null 2>&1 || true
+              docker rm   "$n" >/dev/null 2>&1 || true
+            fi
+          done
+
+          echo "=== Stopping any container still holding :443 or :4444 ==="
+          # `docker ps` Ports column looks like:  0.0.0.0:443->443/tcp, :::443->443/tcp
+          mapfile -t holders < <(
+            docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' \
+              | awk '/(:|->)443\/tcp|->4444\/tcp/ {print $1, $2}'
+          )
+          if [ "${#holders[@]}" -gt 0 ]; then
+            for line in "${holders[@]}"; do
+              id="${line%% *}"
+              name="${line#* }"
+              echo "  stop+rm $name ($id)"
+              docker stop "$id" >/dev/null 2>&1 || true
+              docker rm   "$id" >/dev/null 2>&1 || true
+            done
+          else
+            echo "  (no other container is holding :443 or :4444)"
+          fi
+
+          # If something OTHER than docker is bound to :443 we need to
+          # surface that explicitly — `docker run` would fail with the same
+          # 'port is already allocated' message and the operator wouldn't
+          # know it was nginx/haproxy/sshd/etc.
+          if command -v ss >/dev/null 2>&1; then
+            held443="$(sudo -n ss -ltnp 2>/dev/null | awk '$4 ~ /:443$/' || true)"
+            if [ -n "${held443}" ]; then
+              echo "::warning::Non-docker process bound to :443 — docker run will fail until it's stopped:"
+              echo "${held443}" | sed 's/^/  /'
+            fi
+          fi
 
           echo "=== Starting new container ==="
           docker run -d \
@@ -239,7 +283,7 @@ jobs:
           echo "::error::Deployment to OCI failed. Check the deploy step logs above."
           echo "Manual recovery on the Hub VM:"
           echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
-          echo "  docker stop ${{ env.CONTAINER_NAME }} && docker rm ${{ env.CONTAINER_NAME }}"
+          echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null; docker rm \$n 2>/dev/null; done"
           echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
           echo "    -p 443:443 -p 4444:4444 --env-file ~/matrix-hub/.env \\"
           echo "    -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
