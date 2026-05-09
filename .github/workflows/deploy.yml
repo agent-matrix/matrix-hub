@@ -179,17 +179,81 @@ jobs:
           fi
           echo "=== Using env file: $ENV_FILE ==="
 
+          # ---------------------------------------------------------------
+          # Normalise the .env so docker --env-file gets clean values.
+          #
+          # Why: docker --env-file does NOT strip end-of-line comments.
+          # A line like:
+          #   SEARCH_LEXICAL_BACKEND=none          # options: pgtrgm | none
+          # arrives in the container as the literal string
+          #   'none          # options: pgtrgm | none'
+          # which Pydantic rejects with:
+          #   Input should be 'pgtrgm', 'opensearch' or 'none' [type=enum, …]
+          #
+          # We backup the file, then:
+          #   1. force the four enum values to canonical safe defaults,
+          #   2. ensure the alternative nested keys (SEARCH_BACKEND__LEXICAL/
+          #      __VECTOR) exist with the same values for newer images that
+          #      look at the nested form,
+          #   3. strip ANY '# …' tail from any line whose RHS contains an
+          #      unescaped '#'   (extra belt-and-braces — covers other vars
+          #      that may have inline comments in .env templates we ship).
+          # ---------------------------------------------------------------
+          echo "=== Normalizing .env search settings ==="
+
+          cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
+
+          # 1. force canonical enum values
+          sed -i \
+            -e 's/^SEARCH_LEXICAL_BACKEND=.*/SEARCH_LEXICAL_BACKEND=none/' \
+            -e 's/^SEARCH_VECTOR_BACKEND=.*/SEARCH_VECTOR_BACKEND=none/' \
+            -e 's/^SEARCH_DEFAULT_MODE=.*/SEARCH_DEFAULT_MODE=keyword/' \
+            -e 's/^RERANK_DEFAULT=.*/RERANK_DEFAULT=none/' \
+            "$ENV_FILE"
+
+          # 2. ensure nested-name aliases exist for newer images
+          if grep -q '^SEARCH_BACKEND__LEXICAL=' "$ENV_FILE"; then
+            sed -i 's/^SEARCH_BACKEND__LEXICAL=.*/SEARCH_BACKEND__LEXICAL=none/' "$ENV_FILE"
+          else
+            printf '\nSEARCH_BACKEND__LEXICAL=none\n' >> "$ENV_FILE"
+          fi
+          if grep -q '^SEARCH_BACKEND__VECTOR=' "$ENV_FILE"; then
+            sed -i 's/^SEARCH_BACKEND__VECTOR=.*/SEARCH_BACKEND__VECTOR=none/' "$ENV_FILE"
+          else
+            printf 'SEARCH_BACKEND__VECTOR=none\n' >> "$ENV_FILE"
+          fi
+
+          # 3. defensively strip end-of-line "# …" from every KEY=VALUE
+          #    line whose value isn't quoted. Skip pure-comment lines and
+          #    anything that doesn't look like a KEY=… assignment.
+          #    This catches the case where a *different* var (e.g. INGEST_INTERVAL_MIN)
+          #    has an inline comment that breaks parsing on a newer image.
+          python3 - "$ENV_FILE" <<'PY'
+import re, sys, pathlib
+p = pathlib.Path(sys.argv[1])
+out = []
+for line in p.read_text().splitlines():
+    if not line or line.lstrip().startswith("#") or "=" not in line:
+        out.append(line); continue
+    key, _, val = line.partition("=")
+    # keep quoted values exactly as-is
+    s = val.lstrip()
+    if s.startswith(('"', "'", "[", "{")):
+        out.append(line); continue
+    # remove a trailing inline comment introduced by ' #'
+    cleaned = re.sub(r"\s+#.*$", "", val)
+    out.append(f"{key}={cleaned.rstrip()}")
+p.write_text("\n".join(out) + "\n")
+PY
+
+          echo "Effective search config:"
+          grep -E '^(SEARCH_LEXICAL_BACKEND|SEARCH_VECTOR_BACKEND|SEARCH_BACKEND__LEXICAL|SEARCH_BACKEND__VECTOR|SEARCH_DEFAULT_MODE|RERANK_DEFAULT)=' "$ENV_FILE" || true
+
           echo "=== Pulling ${IMAGE}:${TAG} ==="
           docker pull "${IMAGE}:${TAG}"
 
           # ---------------------------------------------------------------
           # Free ports 443 and 4444 BEFORE docker run.
-          # The previous failure was:
-          #   "Bind for 0.0.0.0:443 failed: port is already allocated"
-          # because a container under a different name (e.g. 'matrixhub'
-          # without the hyphen) was still bound. Stop+rm any container
-          # publishing those ports, plus any that match our canonical or
-          # legacy names.
           # ---------------------------------------------------------------
           echo "=== Stopping any container holding our canonical/legacy names ==="
           for n in "$CONTAINER" "${LEGACY_NAMES[@]}"; do
@@ -201,7 +265,6 @@ jobs:
           done
 
           echo "=== Stopping any container still holding :443 or :4444 ==="
-          # `docker ps` Ports column looks like:  0.0.0.0:443->443/tcp, :::443->443/tcp
           mapfile -t holders < <(
             docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' \
               | awk '/(:|->)443\/tcp|->4444\/tcp/ {print $1, $2}'
@@ -218,10 +281,6 @@ jobs:
             echo "  (no other container is holding :443 or :4444)"
           fi
 
-          # If something OTHER than docker is bound to :443 we need to
-          # surface that explicitly — `docker run` would fail with the same
-          # 'port is already allocated' message and the operator wouldn't
-          # know it was nginx/haproxy/sshd/etc.
           if command -v ss >/dev/null 2>&1; then
             held443="$(sudo -n ss -ltnp 2>/dev/null | awk '$4 ~ /:443$/' || true)"
             if [ -n "${held443}" ]; then
