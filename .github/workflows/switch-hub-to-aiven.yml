@@ -99,24 +99,30 @@ jobs:
           CONTAINER_NAME:     matrix-hub
         run: |
           set -euo pipefail
-          # Normalise to SQLAlchemy psycopg form expected by matrix-hub
+
+          # Normalise to SQLAlchemy psycopg form expected by matrix-hub.
+          # Pure bash + sed — no embedded Python (which would dedent and
+          # break the YAML literal block).
           to_sqla() {
-            python3 -c '
-import sys, re
-u = sys.argv[1]
-u = re.sub(r"^postgres://", "postgresql://", u)
-u = re.sub(r"^postgresql\+(psycopg|asyncpg)://", "postgresql+psycopg://", u)
-if not u.startswith("postgresql+psycopg://"):
-    u = u.replace("postgresql://", "postgresql+psycopg://", 1)
-print(u)
-' "$1"
+            local u="$1"
+            u="$(printf '%s' "$u" | sed -E 's#^postgres://#postgresql://#')"
+            u="$(printf '%s' "$u" | sed -E 's#^postgresql\+asyncpg://#postgresql+psycopg://#')"
+            case "$u" in
+              postgresql+psycopg://*) ;;
+              postgresql://*) u="${u/postgresql:\/\//postgresql+psycopg:\/\/}" ;;
+            esac
+            printf '%s\n' "$u"
           }
+
           PRIMARY_SQLA="$(to_sqla "$AIVEN_URL_RAW")"
           FALLBACK_SQLA=""
-          [ "$KEEP_FALLBACK" = "true" ] && [ -n "$FALLBACK_URL_RAW" ] \
-            && FALLBACK_SQLA="$(to_sqla "$FALLBACK_URL_RAW")" || true
+          if [ "$KEEP_FALLBACK" = "true" ] && [ -n "$FALLBACK_URL_RAW" ]; then
+            FALLBACK_SQLA="$(to_sqla "$FALLBACK_URL_RAW")"
+          fi
 
-          # Send vars over SSH; remote side does the file edit
+          # Send vars over SSH; remote side does the file edit.
+          # Heredoc body is consistently indented at 10 spaces so the
+          # YAML literal scalar isn't terminated prematurely.
           ssh -i ~/.ssh/id_deploy \
               -o StrictHostKeyChecking=yes \
               -o IdentitiesOnly=yes \
@@ -140,13 +146,11 @@ print(u)
           fi
           echo "Using .env at $ENV_FILE"
 
-          # Backup
           cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
 
           upsert() {
             local file="$1" key="$2" value="$3"
             if grep -qE "^${key}=" "$file"; then
-              # Use # as sed delimiter (URL has /)
               sed -i "s#^${key}=.*#${key}=${value//#/\\#}#" "$file"
             else
               printf '\n%s=%s\n' "$key" "$value" >> "$file"
@@ -154,7 +158,6 @@ print(u)
           }
 
           upsert "$ENV_FILE" DATABASE_URL_PRIMARY "$PRIMARY_SQLA"
-          # If a single explicit DATABASE_URL exists, comment it so the selector wins.
           if grep -qE '^DATABASE_URL=' "$ENV_FILE"; then
             sed -i 's#^DATABASE_URL=#\# DATABASE_URL (commented by Switch Hub to Aiven workflow): &#' "$ENV_FILE"
           fi
@@ -162,7 +165,6 @@ print(u)
             upsert "$ENV_FILE" DATABASE_URL_FALLBACK "$FALLBACK_SQLA"
           fi
 
-          # Print masked diff for the operator
           echo "--- updated lines (passwords masked) ---"
           grep -E '^(DATABASE_URL|DATABASE_URL_PRIMARY|DATABASE_URL_FALLBACK)=' "$ENV_FILE" \
             | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#'
@@ -171,7 +173,6 @@ print(u)
             echo "--- restarting container ${CONTAINER_NAME} ---"
             docker stop "${CONTAINER_NAME}" 2>/dev/null || true
             docker rm   "${CONTAINER_NAME}" 2>/dev/null || true
-            # Re-run the official runner if present, else fall back to a minimal docker run
             if [ -x "$HOME/matrix-hub/scripts/run_container.sh" ]; then
               cd "$HOME/matrix-hub" && bash scripts/run_container.sh
             else
@@ -184,6 +185,7 @@ print(u)
                 ruslanmv/matrix-hub:latest
             fi
             echo "--- waiting for /health?check_db=true ---"
+            body=""
             for i in $(seq 1 60); do
               code="$(curl -ksS -o /tmp/h.json -w '%{http_code}' --max-time 5 https://127.0.0.1:443/health?check_db=true || echo 000)"
               body="$(head -c 200 /tmp/h.json 2>/dev/null || true)"
@@ -208,8 +210,8 @@ print(u)
         shell: bash
         run: |
           sleep 8
-          status=$(curl -sS -o /tmp/h.json -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health?check_db=true" || echo 000)
-          body=$(head -c 400 /tmp/h.json 2>/dev/null || true)
+          status="$(curl -sS -o /tmp/h.json -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health?check_db=true" || echo 000)"
+          body="$(head -c 400 /tmp/h.json 2>/dev/null || true)"
           echo "https://api.matrixhub.io/health?check_db=true → HTTP $status"
           echo "  body: $body"
           {
@@ -221,7 +223,7 @@ print(u)
               echo ":white_check_mark: The Hub is now reading from Aiven. The front-end /status page will go green within seconds (it auto-refreshes on page reload)."
             else
               echo
-              echo ":warning: Hub is not yet reporting db:\`ok\`. Possible causes:"
+              echo ":warning: Hub is not yet reporting db:\"ok\". Possible causes:"
               echo "  - matrix-hub container did not pick up the new env (rebuild needed)"
               echo "  - Aiven IP allowlist blocks the Hub VM's egress"
               echo "  - psql client missing inside the container — Dockerfile must include postgresql-client"
