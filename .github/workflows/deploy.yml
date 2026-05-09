@@ -26,6 +26,13 @@ env:
   GATEWAY_PORT: 4444
   PUBLIC_HEALTH_URL: https://api.matrixhub.io/health?check_db=true
   TLS_HOST_DIR: /etc/ssl/matrixhub
+  # uid/gid the container runs as (USER app in the Dockerfile). The
+  # `matrixhub_data` Docker volume must be writable by this uid; we
+  # enforce it on every deploy so a stale volume from an older image
+  # build can't break gunicorn workers with PermissionError on
+  # /app/data/blobs.
+  CONTAINER_UID: "999"
+  CONTAINER_GID: "999"
   # Resource caps for a 1 GB OCI E2.1.Micro instance.
   # Leave ~100 MB headroom for sshd / systemd / kernel.
   CONTAINER_MEMORY: 900m
@@ -56,6 +63,7 @@ jobs:
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
           CF_ORIGIN_CERT: ${{ secrets.CF_ORIGIN_CERT }}
           CF_ORIGIN_KEY:  ${{ secrets.CF_ORIGIN_KEY }}
+          AIVEN_DATABASE_URL: ${{ secrets.AIVEN_DATABASE_URL }}
         run: |
           set -euo pipefail
 
@@ -75,6 +83,7 @@ jobs:
             echo "  OCI_KNOWN_HOSTS=<ssh-keyscan output>"
             echo "  CF_ORIGIN_CERT=<full PEM contents of cf-origin.pem>"
             echo "  CF_ORIGIN_KEY =<full PEM contents of cf-origin.key>"
+            echo "  AIVEN_DATABASE_URL=postgresql+psycopg://avnadmin:<PW>@pg-37455d5-matrixhub-db.c.aivencloud.com:24870/defaultdb?sslmode=require"
             exit 1
           fi
 
@@ -85,6 +94,24 @@ jobs:
           if [ -z "${CF_ORIGIN_CERT:-}" ] && [ -n "${CF_ORIGIN_KEY:-}" ]; then
             echo "::error::CF_ORIGIN_KEY is set but CF_ORIGIN_CERT is not. Set both or neither."
             exit 1
+          fi
+
+          # Defensive sanity check on the DB URL scheme. SQLAlchemy needs the
+          # driver-prefixed form; a raw postgres:// URL works at the psql CLI
+          # but blows up with "Can't load plugin" in this app.
+          if [ -n "${AIVEN_DATABASE_URL:-}" ]; then
+            case "$AIVEN_DATABASE_URL" in
+              postgresql+psycopg://*|postgresql+asyncpg://*)
+                echo "AIVEN_DATABASE_URL scheme looks correct."
+                ;;
+              postgres://*|postgresql://*)
+                echo "::error::AIVEN_DATABASE_URL must use postgresql+psycopg:// (this app is SQLAlchemy/psycopg3). Got: ${AIVEN_DATABASE_URL%%:*}://..."
+                exit 1
+                ;;
+              *)
+                echo "::warning::AIVEN_DATABASE_URL has an unusual scheme; will be applied verbatim."
+                ;;
+            esac
           fi
 
       - name: Determine image tag
@@ -123,6 +150,9 @@ jobs:
             exit 1
           }
 
+          # Best-practice #1: never print the public key itself in logs.
+          # Fingerprint only (SHA256) is sufficient to identify the key
+          # without exposing routable material.
           echo "Deploy key fingerprint:"
           ssh-keygen -l -f ~/.ssh/oci_key.pub
 
@@ -224,13 +254,13 @@ jobs:
 
           # NOTE on permissions:
           # The matrix-hub image runs gunicorn as a non-root user (USER app
-          # in the Dockerfile, uid 1001). With 0640 root:root on the key,
-          # that container user can't read it and gunicorn falls back to
-          # plaintext on :443 → Cloudflare 525. So we use 0644 root:root
-          # for BOTH cert and key (matches the canonical
-          # scripts/install_certificate.sh, with the comment "tighten later
-          # if you run TLS as root inside the container"). The key is still
-          # mounted read-only into the container.
+          # in the Dockerfile, uid 999). With 0640 root:root on the key, that
+          # container user can't read it and gunicorn falls back to plaintext
+          # on :443 → Cloudflare 525. So we use 0644 root:root for BOTH cert
+          # and key (matches the canonical scripts/install_certificate.sh,
+          # with the comment "tighten later if you run TLS as root inside the
+          # container"). The key is still mounted read-only into the
+          # container.
           ssh oci-prod TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'REMOTE'
           set -euo pipefail
           DEST="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
@@ -253,7 +283,10 @@ jobs:
           TLS_HOST_DIR: ${{ env.TLS_HOST_DIR }}
           CONTAINER_MEMORY: ${{ env.CONTAINER_MEMORY }}
           CONTAINER_CPUS: ${{ env.CONTAINER_CPUS }}
+          CONTAINER_UID: ${{ env.CONTAINER_UID }}
+          CONTAINER_GID: ${{ env.CONTAINER_GID }}
           ENV_BACKUPS_TO_KEEP: ${{ env.ENV_BACKUPS_TO_KEEP }}
+          AIVEN_DATABASE_URL: ${{ secrets.AIVEN_DATABASE_URL }}
         run: |
           set -euo pipefail
 
@@ -262,7 +295,10 @@ jobs:
               TLS_HOST_DIR="${TLS_HOST_DIR}" \
               CONTAINER_MEMORY="${CONTAINER_MEMORY}" \
               CONTAINER_CPUS="${CONTAINER_CPUS}" \
+              CONTAINER_UID="${CONTAINER_UID}" \
+              CONTAINER_GID="${CONTAINER_GID}" \
               ENV_BACKUPS_TO_KEEP="${ENV_BACKUPS_TO_KEEP}" \
+              AIVEN_DATABASE_URL="${AIVEN_DATABASE_URL}" \
               bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
@@ -273,6 +309,8 @@ jobs:
           TLS_DIR="${TLS_HOST_DIR:-/etc/ssl/matrixhub}"
           MEM="${CONTAINER_MEMORY:-900m}"
           CPUS="${CONTAINER_CPUS:-0.9}"
+          UID_INSIDE="${CONTAINER_UID:-999}"
+          GID_INSIDE="${CONTAINER_GID:-999}"
           KEEP_BACKUPS="${ENV_BACKUPS_TO_KEEP:-10}"
 
           echo "=== Host info ==="
@@ -329,7 +367,43 @@ jobs:
             | head -n "${KEEP_BACKUPS}" \
             | sed 's/^/  /' || true
 
+          echo "=== Normalizing database URL to Aiven (if AIVEN_DATABASE_URL secret is set) ==="
+          # Make Aiven the source of truth on every deploy. Without this, an
+          # operator-edited .env can drift back to the OL9 fallback IP and
+          # /status will report a different DB to what the architecture doc
+          # promises. The supervisord-driven select_database_url.sh script
+          # still consumes DATABASE_URL_PRIMARY/FALLBACK if you later split
+          # them out — for now we just write the canonical one.
+          if [ -n "${AIVEN_DATABASE_URL:-}" ]; then
+            # Use a `|` delimiter for sed so we don't have to escape the
+            # `/`, `:`, `@`, `?`, `=`, or `&` characters that postgres URLs
+            # love to contain. The URL itself must not contain `|`.
+            for key in DATABASE_URL DATABASE_URL_PRIMARY SQLALCHEMY_DATABASE_URI DB_URL; do
+              if grep -qE "^${key}=" "$ENV_FILE"; then
+                sed -i "s|^${key}=.*|${key}=${AIVEN_DATABASE_URL}|" "$ENV_FILE"
+              fi
+            done
+            # Ensure DATABASE_URL exists even if the .env didn't have it.
+            grep -q '^DATABASE_URL=' "$ENV_FILE" || echo "DATABASE_URL=${AIVEN_DATABASE_URL}" >> "$ENV_FILE"
+            echo "DATABASE_URL is now Aiven (password masked):"
+            grep -E '^(DATABASE_URL|DATABASE_URL_PRIMARY|SQLALCHEMY_DATABASE_URI|DB_URL)=' "$ENV_FILE" \
+              | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#' \
+              | sed 's/^/  /'
+          else
+            echo "::warning::AIVEN_DATABASE_URL secret not provided; keeping DATABASE_URL from .env"
+            grep -E '^(DATABASE_URL|DATABASE_URL_PRIMARY|SQLALCHEMY_DATABASE_URI|DB_URL)=' "$ENV_FILE" \
+              | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#' \
+              | sed 's/^/  /' || true
+          fi
+
           echo "=== Normalizing .env values for Docker --env-file ==="
+          # We touch ONLY the SEARCH_*/RERANK_DEFAULT enums here. Pydantic
+          # rejects values like 'none          # options: pgtrgm | none'
+          # (the inline comment leaks into the value), so we replace those
+          # known keys with canonical values. We deliberately do NOT touch
+          # HOST/PORT — supervisord.conf hard-codes the Hub on :443 and
+          # mcpgateway on :4444 via CLI flags, so any HOST/PORT in the .env
+          # is now ignored anyway.
           sed -i \
             -e 's/^SEARCH_LEXICAL_BACKEND=.*/SEARCH_LEXICAL_BACKEND=none/' \
             -e 's/^SEARCH_VECTOR_BACKEND=.*/SEARCH_VECTOR_BACKEND=none/' \
@@ -415,6 +489,24 @@ jobs:
             fi
           fi
 
+          echo "=== Initializing matrixhub_data volume ownership (uid=${UID_INSIDE} gid=${GID_INSIDE}) ==="
+          # The matrix-hub image runs as USER app (uid 999). Docker named
+          # volumes inherit ownership from whatever was on the image at
+          # FIRST mount, which on some hosts is root — the non-root container
+          # user then can't write /app/data/blobs and gunicorn workers crash
+          # with PermissionError. Fix it deterministically on every deploy
+          # using a one-shot root container.
+          docker volume create matrixhub_data >/dev/null
+          docker run --rm \
+            -v matrixhub_data:/app/data \
+            alpine:3.20 \
+            sh -lc "
+              mkdir -p /app/data/blobs
+              chown -R ${UID_INSIDE}:${GID_INSIDE} /app/data
+              chmod -R u+rwX,g+rwX /app/data
+              ls -la /app/data | sed 's/^/  /'
+            "
+
           echo "=== Starting ${CONTAINER} (memory=${MEM}, cpus=${CPUS}) ==="
           # Resource caps prevent a runaway container from OOM-killing the
           # host on a 1 GB VM.Standard.E2.1.Micro. Tune via the workflow
@@ -458,8 +550,9 @@ jobs:
             done
             echo "Container HEALTHCHECK reports: healthy"
           else
-            until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1 \
-               || curl -ksS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
+            # Fallback: probe HTTPS /health directly. Use -k because the
+            # Cloudflare Origin Cert isn't in the system trust store.
+            until curl -kfsS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
               RETRIES=$((RETRIES + 1))
               if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
                 echo "ERROR: health check failed after ${MAX_RETRIES} attempts."
@@ -475,18 +568,47 @@ jobs:
           echo "=== Local /health?check_db=true ==="
           curl -ksS "https://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
 
-          echo "=== Verifying TLS on :443 ==="
-          if command -v openssl >/dev/null 2>&1; then
-            if echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername api.matrixhub.io 2>/dev/null \
-                 | grep -qE '^subject='; then
-              echo "TLS handshake on :443 OK"
-              echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername api.matrixhub.io 2>/dev/null \
-                 | grep -E '^(subject|issuer)=' | sed 's/^/  /'
-            else
-              echo "::warning::Container is responding on :443 but not negotiating TLS."
-              docker logs --tail 60 "${CONTAINER}" || true
-            fi
+          echo "=== Strict TLS check on :443 ==="
+          # Industry best-practice: enforce a real TLS handshake against the
+          # origin and FAIL the deploy if anything is wrong, instead of
+          # warning silently. Cloudflare Origin Certs are signed by a private
+          # Cloudflare CA that is NOT in the system trust store, so we fetch
+          # the two Cloudflare Origin Root CAs (RSA + ECC) into a temp bundle
+          # and pass that via -CAfile. Without this, -verify_return_error
+          # would always fail with "unable to verify the first certificate".
+          CA_BUNDLE="$(mktemp)"
+          curl -fsSL --max-time 10 \
+            https://developers.cloudflare.com/ssl/static/origin_ca_rsa_root.pem \
+            > "${CA_BUNDLE}" || true
+          curl -fsSL --max-time 10 \
+            https://developers.cloudflare.com/ssl/static/origin_ca_ecc_root.pem \
+            >> "${CA_BUNDLE}" || true
+
+          if [ ! -s "${CA_BUNDLE}" ]; then
+            echo "::warning::Could not fetch Cloudflare Origin Root CAs; falling back to non-verifying handshake."
+            VERIFY_OPTS=""
+          else
+            VERIFY_OPTS="-CAfile ${CA_BUNDLE} -verify_return_error"
           fi
+
+          if echo | timeout 8 openssl s_client \
+                 -connect 127.0.0.1:443 \
+                 -servername api.matrixhub.io \
+                 ${VERIFY_OPTS} \
+                 2>/tmp/matrixhub_tls_check.err \
+               | tee /tmp/matrixhub_tls_check.out \
+               | grep -qE '^subject='; then
+            echo "TLS handshake on :443 OK"
+            grep -E '^(subject|issuer)=' /tmp/matrixhub_tls_check.out | sed 's/^/  /'
+          else
+            echo "::error::Container is not negotiating valid TLS on :443."
+            echo "--- openssl stderr ---"
+            cat /tmp/matrixhub_tls_check.err || true
+            echo "--- last 120 lines of container log ---"
+            docker logs --tail 120 "${CONTAINER}" || true
+            exit 1
+          fi
+          rm -f "${CA_BUNDLE}"
 
           echo "=== Resource usage after start ==="
           docker stats --no-stream "${CONTAINER}" 2>/dev/null \
@@ -515,12 +637,19 @@ jobs:
             echo
           fi
 
+          # Best-practice #2: HTTP 525 means Cloudflare reached the edge
+          # but the origin's TLS handshake failed. That's a hard failure —
+          # `/status` will be red and every public request 5xxs — so fail
+          # the deploy instead of letting the next push silently overwrite
+          # a known-good image.
           if [ "$STATUS" = "525" ]; then
             echo "::error::HTTP 525 — Cloudflare cannot complete TLS handshake to the origin."
             echo "Confirm the Cloudflare Origin Cert is at ${TLS_HOST_DIR}/cf-origin.{pem,key}"
             echo "and that the matrix-hub container started with that path mounted."
+            exit 1
           elif [ "$STATUS" != "200" ]; then
-            echo "::warning::External health check returned HTTP ${STATUS}."
+            echo "::error::External health check returned HTTP ${STATUS}."
+            exit 1
           fi
 
       - name: Deployment summary
@@ -533,12 +662,17 @@ jobs:
             echo "- Image: \`${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG || 'latest' }}\`"
             echo "- Host: \`${{ secrets.OCI_HOST }}\`"
             echo "- User: \`${{ secrets.OCI_USER }}\`"
-            echo "- Container: \`${{ env.CONTAINER_NAME }}\` (memory=${{ env.CONTAINER_MEMORY }}, cpus=${{ env.CONTAINER_CPUS }})"
+            echo "- Container: \`${{ env.CONTAINER_NAME }}\` (memory=${{ env.CONTAINER_MEMORY }}, cpus=${{ env.CONTAINER_CPUS }}, runs as uid=${{ env.CONTAINER_UID }})"
             echo "- TLS dir on host: \`${{ env.TLS_HOST_DIR }}\` (mounted ro into the container)"
             if [ -n "${{ secrets.CF_ORIGIN_CERT }}" ] && [ -n "${{ secrets.CF_ORIGIN_KEY }}" ]; then
               echo "- TLS material managed by workflow (CF_ORIGIN_CERT / CF_ORIGIN_KEY secrets)"
             else
               echo "- TLS material managed manually on the VM (no CF_ORIGIN_* secrets set)"
+            fi
+            if [ -n "${{ secrets.AIVEN_DATABASE_URL }}" ]; then
+              echo "- DATABASE_URL pinned to Aiven by AIVEN_DATABASE_URL secret"
+            else
+              echo "- DATABASE_URL left as-is in the VM's .env (no AIVEN_DATABASE_URL secret set)"
             fi
             echo "- Health URL: \`${{ env.PUBLIC_HEALTH_URL }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -552,6 +686,8 @@ jobs:
           echo "Manual recovery on the Hub VM:"
           echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
           echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null || true; docker rm \$n 2>/dev/null || true; done"
+          echo "  docker volume create matrixhub_data >/dev/null"
+          echo "  docker run --rm -v matrixhub_data:/app/data alpine:3.20 sh -lc 'mkdir -p /app/data/blobs && chown -R ${{ env.CONTAINER_UID }}:${{ env.CONTAINER_GID }} /app/data && chmod -R u+rwX,g+rwX /app/data'"
           echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
           echo "    -p 443:443 -p 4444:4444 \\"
           echo "    --memory ${{ env.CONTAINER_MEMORY }} --memory-swap ${{ env.CONTAINER_MEMORY }} --cpus ${{ env.CONTAINER_CPUS }} \\"

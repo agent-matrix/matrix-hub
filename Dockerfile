@@ -84,16 +84,32 @@ RUN find /app -maxdepth 5 \( -name "*.db" -o -name "*.sqlite" -o -name "mcp.db" 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Security: non-root user
+# Pre-create the runtime data dir so the named-volume mount inherits the
+# right ownership on first use. Without this, docker creates an empty
+# `matrixhub_data` volume populated from the image, but with root
+# ownership on some hosts — the non-root `app` user then can't write to
+# /app/data/blobs and gunicorn workers crash with PermissionError.
+RUN mkdir -p /app/data/blobs && chown -R app:app /app
+
+# Security: non-root user (created above as part of `chown -R app:app /app`
+# fails without the user existing). Create the user *before* the chown.
 RUN groupadd --system app && useradd --system -g app --home /app app && \
-    chown -R app:app /app
+    mkdir -p /app/data/blobs && chown -R app:app /app
 USER app
 
 EXPOSE 443 4444
 
-# Healthcheck for Hub
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:443/" >/dev/null || exit 1
+# Healthcheck: hit /health over HTTPS (since gunicorn terminates TLS on
+# :443 when the Cloudflare Origin Cert is mounted at /etc/ssl/matrixhub).
+# -k allows the self-issued Cloudflare Origin Cert (not in the system
+# trust store) and -f makes curl fail on non-2xx so the healthcheck
+# correctly reflects /health's outcome.
+#
+# start-period is 60s rather than 40s because the first run may apply
+# Alembic migrations against a freshly-provisioned Postgres (a few
+# extra seconds beyond the warmup).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
+  CMD curl -kfsS "https://127.0.0.1:443/health" >/dev/null || exit 1
 
 # Default: run both via supervisor (entrypoint scrubs any SQLite before start)
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]

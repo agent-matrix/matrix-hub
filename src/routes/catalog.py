@@ -55,6 +55,8 @@ except Exception:  # pragma: no cover
 
 router = APIRouter(prefix="/catalog")
 
+log = logging.getLogger("route.catalog")
+
 
 # ----------- Helpers -----------
 
@@ -126,6 +128,60 @@ def search_catalog(
     ),
     db: Session = Depends(get_db),
 ) -> schemas.SearchResponse:
+    # Defensive wrapper: any exception inside the hybrid search pipeline
+    # used to bubble up as an unstructured 500 (which Cloudflare wrapped
+    # into 502 and the frontend showed as "Search unavailable"). Catching
+    # here lets us:
+    #   - log the full traceback with the request id, so operators can find
+    #     the root cause in the container logs;
+    #   - return a stable JSON shape `{detail: {error, reason}}` so the
+    #     frontend's "hub_error" branch surfaces a useful message instead
+    #     of a transparent 502.
+    rid = getattr(getattr(request, "state", object()), "request_id", None)
+    try:
+        return _search_catalog_impl(
+            request=request,
+            q=q,
+            type=type,
+            capabilities=capabilities,
+            frameworks=frameworks,
+            providers=providers,
+            mode=mode,
+            limit=limit,
+            with_rag=with_rag,
+            with_snippets=with_snippets,
+            rerank_mode=rerank_mode,
+            include_pending=include_pending,
+            db=db,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("catalog.search failed", extra={"rid": rid, "q": q, "mode": getattr(mode, "value", str(mode))})
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail={
+                "error": "SearchFailed",
+                "reason": type(exc).__name__ + ": " + str(exc),
+            },
+        ) from exc
+
+
+def _search_catalog_impl(
+    request: Request,
+    q: str,
+    type: Optional[str],
+    capabilities: Optional[str],
+    frameworks: Optional[str],
+    providers: Optional[str],
+    mode: schemas.SearchMode,
+    limit: int,
+    with_rag: bool,
+    with_snippets: bool,
+    rerank_mode: schemas.RerankMode,
+    include_pending: bool,
+    db: Session,
+) -> JSONResponse:
     filters = _parse_filters(type, capabilities, frameworks, providers)
 
     # Treat 'any' as no type filter (public meta search behavior)
@@ -166,7 +222,18 @@ def search_catalog(
             # Avoid passing db to Null backends (defensive getattr)
             if "Null" not in getattr(getattr(lexical, "__class__", object), "__name__", ""):
                 lex_kwargs["db"] = db
-            lex_hits = lexical.search(q, **lex_kwargs)
+            try:
+                lex_hits = lexical.search(q, **lex_kwargs)
+            except TypeError as exc:
+                # The configured backend doesn't accept one of our keyword
+                # args (e.g. NullLexicalBackend doesn't accept
+                # `include_pending`). Drop the unknown kwargs and retry
+                # rather than 500'ing the whole request.
+                log.warning("lexical backend %s rejected kwargs (%s); retrying without them",
+                            getattr(getattr(lexical, "__class__", object), "__name__", "?"), exc)
+                for k in ("include_pending", "db"):
+                    lex_kwargs.pop(k, None)
+                lex_hits = lexical.search(q, **lex_kwargs)
 
     # Vector (ANN) unless keyword-only — restore v0.1.4 behavior
     vec_hits: List[Dict[str, Any]] = []
@@ -179,7 +246,14 @@ def search_catalog(
             vec_kwargs.pop("include_pending", None)
         else:
             vec_kwargs["db"] = db
-        vec_hits = vector.search(q_vec, **vec_kwargs)
+        try:
+            vec_hits = vector.search(q_vec, **vec_kwargs)
+        except TypeError as exc:
+            log.warning("vector backend %s rejected kwargs (%s); retrying without them",
+                        getattr(getattr(vector, "__class__", object), "__name__", "?"), exc)
+            for k in ("include_pending", "db"):
+                vec_kwargs.pop(k, None)
+            vec_hits = vector.search(q_vec, **vec_kwargs)
 
     # Blend + scoring
     merged = ranker.merge_and_score(lex_hits, vec_hits)
