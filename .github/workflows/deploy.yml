@@ -1,7 +1,7 @@
 name: "Deploy to Oracle Cloud"
 
 # Triggers:
-# 1. Automatically after Docker Hub push completes (on release)
+# 1. Automatically after a Docker Hub publish (on release)
 # 2. Manually via workflow_dispatch
 on:
   workflow_run:
@@ -19,12 +19,10 @@ permissions:
 
 concurrency:
   group: deploy-oci
-  cancel-in-progress: false  # never cancel a running deploy
+  cancel-in-progress: false
 
 env:
   DOCKER_IMAGE: ruslanmv/matrix-hub
-  OCI_HOST: ${{ secrets.OCI_HOST }}            # 129.213.165.60
-  OCI_USER: ${{ secrets.OCI_USER || 'opc' }}   # Oracle Linux default
   CONTAINER_NAME: matrix-hub
   HUB_PORT: 443
   GATEWAY_PORT: 4444
@@ -42,6 +40,25 @@ jobs:
       - name: Checkout (for deploy scripts)
         uses: actions/checkout@v4
 
+      - name: Verify required secrets
+        shell: bash
+        env:
+          OCI_HOST:            ${{ secrets.OCI_HOST }}
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+        run: |
+          missing=()
+          [ -n "$OCI_HOST"            ] || missing+=(OCI_HOST)
+          [ -n "$OCI_SSH_PRIVATE_KEY" ] || missing+=(OCI_SSH_PRIVATE_KEY)
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required secrets: ${missing[*]}"
+            echo "Add them in repo Settings → Secrets and variables → Actions:"
+            echo "  OCI_HOST                 = the public IP of the Hub VM (e.g. 129.213.165.60)"
+            echo "  OCI_USER                 = ssh user (default opc; use 'ubuntu' for Ubuntu hosts)"
+            echo "  OCI_SSH_PRIVATE_KEY      = full PEM contents of the deploy private key"
+            echo "  OCI_KNOWN_HOSTS          = (optional) ssh-keyscan output, otherwise we run keyscan"
+            exit 1
+          fi
+
       - name: Determine image tag
         id: tag
         shell: bash
@@ -56,32 +73,76 @@ jobs:
 
       - name: Configure SSH
         shell: bash
+        env:
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          OCI_USER: ${{ secrets.OCI_USER || 'opc' }}
+          KEY:      ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          KNOWN:    ${{ secrets.OCI_KNOWN_HOSTS }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.OCI_SSH_PRIVATE_KEY }}" > ~/.ssh/oci_key
+          set -euo pipefail
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/oci_key
           chmod 600 ~/.ssh/oci_key
-          # Disable strict host checking for CI
-          cat >> ~/.ssh/config <<EOF
+
+          # known_hosts: pinned secret if given, else ssh-keyscan (TOFU within run)
+          if [ -n "$KNOWN" ]; then
+            printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts
+            echo "Using OCI_KNOWN_HOSTS from secret ($(wc -l < ~/.ssh/known_hosts) lines)."
+          else
+            echo "OCI_KNOWN_HOSTS not set — running ssh-keyscan against $OCI_HOST…"
+            ssh-keyscan -H -T 10 "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null || true
+            if ! [ -s ~/.ssh/known_hosts ]; then
+              echo "::error::ssh-keyscan returned no host keys — is OCI_HOST=\"$OCI_HOST\" reachable on TCP/22?"
+              exit 1
+            fi
+          fi
+          chmod 644 ~/.ssh/known_hosts
+
+          # Build ~/.ssh/config defensively. Use a heredoc with explicit values
+          # rather than ${{ env.X }} so empty values produce loud failures, not
+          # the cryptic 'no argument after keyword "hostname"'.
+          cat > ~/.ssh/config <<EOF
           Host oci-prod
-            HostName ${{ env.OCI_HOST }}
-            User ${{ env.OCI_USER }}
+            HostName ${OCI_HOST}
+            User ${OCI_USER}
             IdentityFile ~/.ssh/oci_key
-            StrictHostKeyChecking no
-            UserKnownHostsFile /dev/null
+            StrictHostKeyChecking yes
+            UserKnownHostsFile ~/.ssh/known_hosts
             ConnectTimeout 30
           EOF
+          chmod 600 ~/.ssh/config
+
+          echo "Final ~/.ssh/config:"
+          sed 's/^/  /' ~/.ssh/config
 
       - name: Deploy via SSH
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.TAG }}
         run: |
-          ssh oci-prod bash -s <<'DEPLOY_SCRIPT'
+          ssh oci-prod TAG="${TAG}" bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
           IMAGE="ruslanmv/matrix-hub"
           TAG="${TAG:-latest}"
           CONTAINER="matrix-hub"
+
+          # Detect where the .env lives — it depends on the OS / user
+          for candidate in \
+            "${HOME}/matrix-hub/.env" \
+            "/home/opc/matrix-hub/.env" \
+            "/home/ubuntu/matrix-hub/.env"
+          do
+            if [ -f "$candidate" ]; then ENV_FILE="$candidate"; break; fi
+          done
+          ENV_FILE="${ENV_FILE:-${HOME}/matrix-hub/.env}"
+
+          if [ ! -f "$ENV_FILE" ]; then
+            echo "ERROR: no .env file found at any of the candidate paths." >&2
+            echo "Create one with: cd ~/matrix-hub && cp .env.production.example .env && \$EDITOR .env" >&2
+            exit 1
+          fi
+          echo "=== Using env file: $ENV_FILE ==="
 
           echo "=== Pulling ${IMAGE}:${TAG} ==="
           docker pull "${IMAGE}:${TAG}"
@@ -96,18 +157,19 @@ jobs:
             --restart unless-stopped \
             -p 443:443 \
             -p 4444:4444 \
-            --env-file /home/opc/matrix-hub/.env \
+            --env-file "${ENV_FILE}" \
             -v matrixhub_data:/app/data \
             "${IMAGE}:${TAG}"
 
           echo "=== Waiting for health check ==="
           RETRIES=0
           MAX_RETRIES=30
-          until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1; do
+          until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1 \
+             || curl -ksS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
             RETRIES=$((RETRIES + 1))
             if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
               echo "ERROR: Health check failed after ${MAX_RETRIES} attempts"
-              docker logs --tail 50 "${CONTAINER}"
+              docker logs --tail 80 "${CONTAINER}"
               exit 1
             fi
             echo "  Waiting... (${RETRIES}/${MAX_RETRIES})"
@@ -115,7 +177,7 @@ jobs:
           done
 
           echo "=== Health check passed ==="
-          curl -s "http://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
+          curl -ksS "https://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
 
           echo "=== Cleaning up old images ==="
           docker image prune -f
@@ -126,13 +188,13 @@ jobs:
       - name: Verify deployment (external)
         shell: bash
         run: |
-          echo "Verifying external access to https://api.matrixhub.io..."
+          echo "Verifying external access to https://api.matrixhub.io…"
           sleep 5
-          STATUS=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health" || echo "000")
-          if [ "$STATUS" = "200" ]; then
-            echo "External health check passed (HTTP $STATUS)"
-          else
-            echo "WARNING: External health check returned HTTP $STATUS (may need DNS/TLS propagation)"
+          STATUS=$(curl -s -o /tmp/h.json -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health?check_db=true" || echo "000")
+          echo "HTTP $STATUS"
+          [ -s /tmp/h.json ] && head -c 400 /tmp/h.json || true
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::External /health returned HTTP $STATUS (may need DNS/TLS propagation, or .env DATABASE_URL_PRIMARY not pointing at Aiven yet)."
           fi
 
       - name: Notify on failure
@@ -140,7 +202,9 @@ jobs:
         shell: bash
         run: |
           echo "::error::Deployment to OCI failed. Check the deploy step logs above."
-          echo "Manual recovery: ssh into ${{ env.OCI_HOST }} and run:"
+          echo "Manual recovery on the Hub VM:"
           echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
           echo "  docker stop ${{ env.CONTAINER_NAME }} && docker rm ${{ env.CONTAINER_NAME }}"
-          echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped -p 443:443 -p 4444:4444 --env-file /home/opc/matrix-hub/.env -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
+          echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
+          echo "    -p 443:443 -p 4444:4444 --env-file ~/matrix-hub/.env \\"
+          echo "    -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
