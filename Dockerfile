@@ -56,9 +56,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:/app/mcpgateway/.venv/bin:${PATH}" \
     INGEST_SCHED_ENABLED=false
 
-# Supervisor to run multiple processes; curl for healthcheck
+# Supervisor to run multiple processes; curl for healthcheck;
+# postgresql-client so docker-entrypoint.sh + scripts/select_database_url.sh
+# can probe DATABASE_URL_PRIMARY/FALLBACK via psql at boot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    supervisor curl \
+    supervisor curl postgresql-client \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -66,13 +68,19 @@ WORKDIR /app
 # Copy built app and both virtualenvs
 COPY --from=builder /app /app
 
+# Copy operational scripts the entrypoint relies on (selector, diagnosis, test_db).
+# These live alongside the source and are NOT secrets.
+COPY scripts/ /app/scripts/
+RUN chmod +x /app/scripts/*.sh || true
+
 # Supervisor config (starts hub + gateway)
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
 # 🚫 Guard again in the final image
 RUN find /app -maxdepth 5 \( -name "*.db" -o -name "*.sqlite" -o -name "mcp.db" \) -print -delete || true
 
-# Tiny entrypoint to delete any runtime-stale SQLite DB before Supervisor
+# Tiny entrypoint that resolves DATABASE_URL_PRIMARY / DATABASE_URL_FALLBACK,
+# scrubs any leftover SQLite, then exec's supervisord.
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
