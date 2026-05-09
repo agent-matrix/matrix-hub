@@ -1,16 +1,14 @@
 name: "Deploy to Oracle Cloud"
 
-# Triggers:
-# 1. Automatically after a Docker Hub publish (on release)
-# 2. Manually via workflow_dispatch
 on:
   workflow_run:
     workflows: ["📦 Publish Docker (Docker Hub)"]
     types: [completed]
+
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Docker image tag to deploy (default: latest)"
+        description: "Docker image tag to deploy. Default: latest"
         required: false
         default: "latest"
 
@@ -26,38 +24,46 @@ env:
   CONTAINER_NAME: matrix-hub
   HUB_PORT: 443
   GATEWAY_PORT: 4444
+  PUBLIC_HEALTH_URL: https://api.matrixhub.io/health?check_db=true
 
 jobs:
   deploy:
     name: Deploy to OCI
     runs-on: ubuntu-latest
+
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.workflow_run.conclusion == 'success'
 
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout (for deploy scripts)
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Verify required secrets
         shell: bash
         env:
-          OCI_HOST:            ${{ secrets.OCI_HOST }}
-          OCI_USER:            ${{ secrets.OCI_USER }}
+          OCI_HOST: ${{ secrets.OCI_HOST }}
+          OCI_USER: ${{ secrets.OCI_USER }}
           OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
         run: |
+          set -euo pipefail
+
           missing=()
-          [ -n "$OCI_HOST"            ] || missing+=(OCI_HOST)
-          [ -n "$OCI_USER"            ] || missing+=(OCI_USER)
-          [ -n "$OCI_SSH_PRIVATE_KEY" ] || missing+=(OCI_SSH_PRIVATE_KEY)
+          [ -n "${OCI_HOST:-}" ] || missing+=(OCI_HOST)
+          [ -n "${OCI_USER:-}" ] || missing+=(OCI_USER)
+          [ -n "${OCI_SSH_PRIVATE_KEY:-}" ] || missing+=(OCI_SSH_PRIVATE_KEY)
+
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::Missing required secrets: ${missing[*]}"
-            echo "Add them in repo Settings → Secrets and variables → Actions:"
-            echo "  OCI_HOST                 = the public IP of the Hub VM"
-            echo "                              (Oracle Linux: 141.148.40.165, Ubuntu: 129.213.165.60)"
-            echo "  OCI_USER                 = ssh user — 'opc' for Oracle Linux, 'ubuntu' for Ubuntu"
-            echo "  OCI_SSH_PRIVATE_KEY      = full PEM contents of the deploy private key"
-            echo "  OCI_KNOWN_HOSTS          = (optional) ssh-keyscan output, otherwise we run keyscan"
+            echo "Required secrets:"
+            echo "  OCI_HOST=129.213.165.60"
+            echo "  OCI_USER=ubuntu"
+            echo "  OCI_SSH_PRIVATE_KEY=<full OpenSSH private key>"
+            echo
+            echo "Optional secret:"
+            echo "  OCI_KNOWN_HOSTS=<ssh-keyscan output>"
             exit 1
           fi
 
@@ -65,12 +71,15 @@ jobs:
         id: tag
         shell: bash
         run: |
+          set -euo pipefail
+
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             TAG="${{ github.event.inputs.image_tag || 'latest' }}"
           else
             TAG="latest"
           fi
-          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+
+          echo "TAG=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Deploying ${DOCKER_IMAGE}:${TAG}"
 
       - name: Configure SSH
@@ -78,41 +87,34 @@ jobs:
         env:
           OCI_HOST: ${{ secrets.OCI_HOST }}
           OCI_USER: ${{ secrets.OCI_USER }}
-          KEY:      ${{ secrets.OCI_SSH_PRIVATE_KEY }}
-          KNOWN:    ${{ secrets.OCI_KNOWN_HOSTS }}
+          OCI_SSH_PRIVATE_KEY: ${{ secrets.OCI_SSH_PRIVATE_KEY }}
+          OCI_KNOWN_HOSTS: ${{ secrets.OCI_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
-
-          if [ -z "${OCI_USER:-}" ]; then
-            echo "::error::Missing OCI_USER. Use 'opc' for Oracle Linux or 'ubuntu' for Ubuntu."
-            exit 1
-          fi
 
           mkdir -p ~/.ssh
           chmod 700 ~/.ssh
 
-          # Normalize Windows CRLF keys
-          printf '%s\n' "$KEY" | tr -d '\r' > ~/.ssh/oci_key
+          printf '%s\n' "$OCI_SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/oci_key
           chmod 600 ~/.ssh/oci_key
 
           ssh-keygen -y -f ~/.ssh/oci_key > ~/.ssh/oci_key.pub || {
-            echo "::error::OCI_SSH_PRIVATE_KEY is not a valid private key, or it is passphrase-protected."
+            echo "::error::OCI_SSH_PRIVATE_KEY is not a valid unencrypted private key."
             exit 1
           }
-          echo "--- public key derived from OCI_SSH_PRIVATE_KEY ---"
-          echo "(paste this into ~${OCI_USER}/.ssh/authorized_keys on ${OCI_HOST} if missing):"
-          cat ~/.ssh/oci_key.pub
-          echo "--- fingerprint ---"
+
+          echo "Deploy key fingerprint:"
           ssh-keygen -l -f ~/.ssh/oci_key.pub
 
-          if [ -n "${KNOWN:-}" ]; then
-            printf '%s\n' "$KNOWN" | tr -d '\r' > ~/.ssh/known_hosts
+          if [ -n "${OCI_KNOWN_HOSTS:-}" ]; then
+            printf '%s\n' "$OCI_KNOWN_HOSTS" | tr -d '\r' > ~/.ssh/known_hosts
           else
-            ssh-keyscan -H -T 15 "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null
+            echo "OCI_KNOWN_HOSTS not set; scanning ${OCI_HOST}..."
+            ssh-keyscan -H -T 15 -t ed25519,rsa,ecdsa "$OCI_HOST" > ~/.ssh/known_hosts 2>/dev/null
           fi
 
-          if ! [ -s ~/.ssh/known_hosts ]; then
-            echo "::error::No SSH host key found for $OCI_HOST. Port 22 may be unreachable."
+          if [ ! -s ~/.ssh/known_hosts ]; then
+            echo "::error::No SSH host key found for ${OCI_HOST}. Check TCP/22."
             exit 1
           fi
 
@@ -120,14 +122,16 @@ jobs:
 
           cat > ~/.ssh/config <<EOF
           Host oci-prod
-            HostName $OCI_HOST
-            User $OCI_USER
+            HostName ${OCI_HOST}
+            User ${OCI_USER}
             IdentityFile ~/.ssh/oci_key
             IdentitiesOnly yes
             BatchMode yes
             StrictHostKeyChecking yes
             UserKnownHostsFile ~/.ssh/known_hosts
             ConnectTimeout 30
+            ServerAliveInterval 15
+            ServerAliveCountMax 3
             PreferredAuthentications publickey
             PasswordAuthentication no
             KbdInteractiveAuthentication no
@@ -136,160 +140,148 @@ jobs:
           chmod 600 ~/.ssh/config
 
           echo "Testing SSH login..."
-          if ! ssh -vvv oci-prod 'echo "SSH OK"; whoami; hostname; uptime'; then
-            echo
-            echo "::error::SSH preflight failed. Common causes:"
-            echo "  1. OCI_USER is wrong. 'opc' = Oracle Linux, 'ubuntu' = Ubuntu."
-            echo "  2. The PUBLIC key printed above is not in ~${OCI_USER}/.ssh/authorized_keys on ${OCI_HOST}."
-            echo "  3. The PRIVATE key in OCI_SSH_PRIVATE_KEY does not match what's installed on the VM."
-            echo "  4. ~${OCI_USER}/.ssh perms are wrong on the VM. Fix:"
-            echo "       chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys && chown -R ${OCI_USER}:${OCI_USER} ~/.ssh"
-            exit 1
-          fi
+          ssh oci-prod 'echo "SSH OK"; whoami; hostname; uptime'
 
       - name: Deploy via SSH
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.TAG }}
         run: |
+          set -euo pipefail
+
           ssh oci-prod TAG="${TAG}" bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
           IMAGE="ruslanmv/matrix-hub"
           TAG="${TAG:-latest}"
           CONTAINER="matrix-hub"
-          # Legacy / alternative names that may already be holding our ports
-          # from a previous setup. Stop them too so 443/4444 free up.
           LEGACY_NAMES=("matrixhub")
 
-          # Detect where the .env lives — it depends on the OS / user
+          echo "=== Host info ==="
+          whoami
+          hostname
+          uptime
+
+          echo "=== Detecting env file ==="
+          ENV_FILE=""
+
           for candidate in \
             "${HOME}/matrix-hub/.env" \
-            "/home/opc/matrix-hub/.env" \
-            "/home/ubuntu/matrix-hub/.env"
+            "/home/ubuntu/matrix-hub/.env" \
+            "/home/opc/matrix-hub/.env"
           do
-            if [ -f "$candidate" ]; then ENV_FILE="$candidate"; break; fi
+            if [ -f "$candidate" ]; then
+              ENV_FILE="$candidate"
+              break
+            fi
           done
-          ENV_FILE="${ENV_FILE:-${HOME}/matrix-hub/.env}"
 
-          if [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: no .env file found at any of the candidate paths." >&2
-            echo "Create one with: cd ~/matrix-hub && cp .env.production.example .env && \$EDITOR .env" >&2
+          if [ -z "$ENV_FILE" ] || [ ! -f "$ENV_FILE" ]; then
+            echo "ERROR: no .env file found." >&2
+            echo "Expected one of:" >&2
+            echo "  ${HOME}/matrix-hub/.env" >&2
+            echo "  /home/ubuntu/matrix-hub/.env" >&2
+            echo "  /home/opc/matrix-hub/.env" >&2
             exit 1
           fi
+
           echo "=== Using env file: $ENV_FILE ==="
 
-          # ---------------------------------------------------------------
-          # Normalise the .env so docker --env-file gets clean values.
-          #
-          # Why: docker --env-file does NOT strip end-of-line comments.
-          # A line like:
-          #   SEARCH_LEXICAL_BACKEND=none          # options: pgtrgm | none
-          # arrives in the container as the literal string
-          #   'none          # options: pgtrgm | none'
-          # which Pydantic rejects with:
-          #   Input should be 'pgtrgm', 'opensearch' or 'none' [type=enum, …]
-          #
-          # We backup the file, then:
-          #   1. force the four enum values to canonical safe defaults,
-          #   2. ensure the alternative nested keys (SEARCH_BACKEND__LEXICAL/
-          #      __VECTOR) exist with the same values for newer images that
-          #      look at the nested form,
-          #   3. strip ANY '# …' tail from any line whose RHS contains an
-          #      unescaped '#'   (extra belt-and-braces — covers other vars
-          #      that may have inline comments in .env templates we ship).
-          # ---------------------------------------------------------------
-          echo "=== Normalizing .env search settings ==="
-
+          echo "=== Backing up .env ==="
           cp "$ENV_FILE" "${ENV_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
 
-          # 1. force canonical enum values
+          echo "=== Normalizing .env values for Docker --env-file ==="
+
           sed -i \
             -e 's/^SEARCH_LEXICAL_BACKEND=.*/SEARCH_LEXICAL_BACKEND=none/' \
             -e 's/^SEARCH_VECTOR_BACKEND=.*/SEARCH_VECTOR_BACKEND=none/' \
+            -e 's/^SEARCH_BACKEND__LEXICAL=.*/SEARCH_BACKEND__LEXICAL=none/' \
+            -e 's/^SEARCH_BACKEND__VECTOR=.*/SEARCH_BACKEND__VECTOR=none/' \
             -e 's/^SEARCH_DEFAULT_MODE=.*/SEARCH_DEFAULT_MODE=keyword/' \
             -e 's/^RERANK_DEFAULT=.*/RERANK_DEFAULT=none/' \
             "$ENV_FILE"
 
-          # 2. ensure nested-name aliases exist for newer images
-          if grep -q '^SEARCH_BACKEND__LEXICAL=' "$ENV_FILE"; then
-            sed -i 's/^SEARCH_BACKEND__LEXICAL=.*/SEARCH_BACKEND__LEXICAL=none/' "$ENV_FILE"
-          else
-            printf '\nSEARCH_BACKEND__LEXICAL=none\n' >> "$ENV_FILE"
-          fi
-          if grep -q '^SEARCH_BACKEND__VECTOR=' "$ENV_FILE"; then
-            sed -i 's/^SEARCH_BACKEND__VECTOR=.*/SEARCH_BACKEND__VECTOR=none/' "$ENV_FILE"
-          else
-            printf 'SEARCH_BACKEND__VECTOR=none\n' >> "$ENV_FILE"
-          fi
+          grep -q '^SEARCH_LEXICAL_BACKEND=' "$ENV_FILE" || echo 'SEARCH_LEXICAL_BACKEND=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_VECTOR_BACKEND=' "$ENV_FILE" || echo 'SEARCH_VECTOR_BACKEND=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_BACKEND__LEXICAL=' "$ENV_FILE" || echo 'SEARCH_BACKEND__LEXICAL=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_BACKEND__VECTOR=' "$ENV_FILE" || echo 'SEARCH_BACKEND__VECTOR=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_DEFAULT_MODE=' "$ENV_FILE" || echo 'SEARCH_DEFAULT_MODE=keyword' >> "$ENV_FILE"
+          grep -q '^RERANK_DEFAULT=' "$ENV_FILE" || echo 'RERANK_DEFAULT=none' >> "$ENV_FILE"
 
-          # 3. defensively strip end-of-line "# …" from every KEY=VALUE
-          #    line whose value isn't quoted. Skip pure-comment lines and
-          #    anything that doesn't look like a KEY=… assignment.
-          #    This catches the case where a *different* var (e.g. INGEST_INTERVAL_MIN)
-          #    has an inline comment that breaks parsing on a newer image.
           python3 - "$ENV_FILE" <<'PY'
-import re, sys, pathlib
-p = pathlib.Path(sys.argv[1])
-out = []
-for line in p.read_text().splitlines():
-    if not line or line.lstrip().startswith("#") or "=" not in line:
-        out.append(line); continue
-    key, _, val = line.partition("=")
-    # keep quoted values exactly as-is
-    s = val.lstrip()
-    if s.startswith(('"', "'", "[", "{")):
-        out.append(line); continue
-    # remove a trailing inline comment introduced by ' #'
-    cleaned = re.sub(r"\s+#.*$", "", val)
-    out.append(f"{key}={cleaned.rstrip()}")
-p.write_text("\n".join(out) + "\n")
-PY
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path(sys.argv[1])
+          lines = path.read_text().splitlines()
+          cleaned = []
+
+          for line in lines:
+              stripped = line.lstrip()
+
+              if not line or stripped.startswith("#") or "=" not in line:
+                  cleaned.append(line)
+                  continue
+
+              key, sep, value = line.partition("=")
+              value_lstrip = value.lstrip()
+
+              # Keep JSON/list/quoted values unchanged.
+              if value_lstrip.startswith(('"', "'", "[", "{")):
+                  cleaned.append(line)
+                  continue
+
+              # Docker --env-file does not remove inline comments.
+              # Strip only comments introduced by whitespace + #.
+              value = re.sub(r"\s+#.*$", "", value).rstrip()
+              cleaned.append(f"{key}{sep}{value}")
+
+          path.write_text("\n".join(cleaned) + "\n")
+          PY
 
           echo "Effective search config:"
-          grep -E '^(SEARCH_LEXICAL_BACKEND|SEARCH_VECTOR_BACKEND|SEARCH_BACKEND__LEXICAL|SEARCH_BACKEND__VECTOR|SEARCH_DEFAULT_MODE|RERANK_DEFAULT)=' "$ENV_FILE" || true
+          grep -E '^(SEARCH_LEXICAL_BACKEND|SEARCH_VECTOR_BACKEND|SEARCH_BACKEND__LEXICAL|SEARCH_BACKEND__VECTOR|SEARCH_DEFAULT_MODE|RERANK_DEFAULT)=' "$ENV_FILE"
 
           echo "=== Pulling ${IMAGE}:${TAG} ==="
           docker pull "${IMAGE}:${TAG}"
 
-          # ---------------------------------------------------------------
-          # Free ports 443 and 4444 BEFORE docker run.
-          # ---------------------------------------------------------------
-          echo "=== Stopping any container holding our canonical/legacy names ==="
-          for n in "$CONTAINER" "${LEGACY_NAMES[@]}"; do
-            if docker ps -a --format '{{.Names}}' | grep -qx "$n"; then
-              echo "  stop+rm $n"
-              docker stop "$n" >/dev/null 2>&1 || true
-              docker rm   "$n" >/dev/null 2>&1 || true
+          echo "=== Stopping canonical and legacy containers ==="
+          for name in "$CONTAINER" "${LEGACY_NAMES[@]}"; do
+            if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
+              echo "Stopping/removing $name"
+              docker stop "$name" >/dev/null 2>&1 || true
+              docker rm "$name" >/dev/null 2>&1 || true
             fi
           done
 
-          echo "=== Stopping any container still holding :443 or :4444 ==="
+          echo "=== Stopping containers holding :443 or :4444 ==="
           mapfile -t holders < <(
             docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' \
               | awk '/(:|->)443\/tcp|->4444\/tcp/ {print $1, $2}'
           )
+
           if [ "${#holders[@]}" -gt 0 ]; then
             for line in "${holders[@]}"; do
               id="${line%% *}"
               name="${line#* }"
-              echo "  stop+rm $name ($id)"
+              echo "Stopping/removing $name ($id)"
               docker stop "$id" >/dev/null 2>&1 || true
-              docker rm   "$id" >/dev/null 2>&1 || true
+              docker rm "$id" >/dev/null 2>&1 || true
             done
           else
-            echo "  (no other container is holding :443 or :4444)"
+            echo "No running Docker container is holding :443 or :4444."
           fi
 
           if command -v ss >/dev/null 2>&1; then
             held443="$(sudo -n ss -ltnp 2>/dev/null | awk '$4 ~ /:443$/' || true)"
-            if [ -n "${held443}" ]; then
-              echo "::warning::Non-docker process bound to :443 — docker run will fail until it's stopped:"
-              echo "${held443}" | sed 's/^/  /'
+            if [ -n "$held443" ]; then
+              echo "::warning::A non-Docker process is bound to :443:"
+              echo "$held443" | sed 's/^/  /'
             fi
           fi
 
-          echo "=== Starting new container ==="
+          echo "=== Starting ${CONTAINER} ==="
           docker run -d \
             --name "${CONTAINER}" \
             --restart unless-stopped \
@@ -301,48 +293,78 @@ PY
 
           echo "=== Waiting for health check ==="
           RETRIES=0
-          MAX_RETRIES=30
+          MAX_RETRIES=45
+
           until curl -fsS --max-time 5 "http://127.0.0.1:443/health" >/dev/null 2>&1 \
              || curl -ksS --max-time 5 "https://127.0.0.1:443/health" >/dev/null 2>&1; do
             RETRIES=$((RETRIES + 1))
+
             if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
-              echo "ERROR: Health check failed after ${MAX_RETRIES} attempts"
-              docker logs --tail 80 "${CONTAINER}"
+              echo "ERROR: health check failed after ${MAX_RETRIES} attempts."
+              echo "=== Container status ==="
+              docker ps -a || true
+              echo "=== Container logs ==="
+              docker logs --tail 150 "${CONTAINER}" || true
               exit 1
             fi
-            echo "  Waiting... (${RETRIES}/${MAX_RETRIES})"
+
+            echo "Waiting... (${RETRIES}/${MAX_RETRIES})"
             sleep 2
           done
 
-          echo "=== Health check passed ==="
+          echo "=== Local health check passed ==="
           curl -ksS "https://127.0.0.1:443/health?check_db=true" | python3 -m json.tool || true
 
-          echo "=== Cleaning up old images ==="
-          docker image prune -f
+          echo "=== Cleaning old Docker images ==="
+          docker image prune -f || true
 
           echo "=== Deploy complete ==="
           DEPLOY_SCRIPT
 
-      - name: Verify deployment (external)
+      - name: Verify deployment externally
         shell: bash
         run: |
-          echo "Verifying external access to https://api.matrixhub.io…"
+          set -euo pipefail
+
+          echo "Verifying external access to ${PUBLIC_HEALTH_URL}"
           sleep 5
-          STATUS=$(curl -s -o /tmp/h.json -w '%{http_code}' --max-time 15 "https://api.matrixhub.io/health?check_db=true" || echo "000")
-          echo "HTTP $STATUS"
-          [ -s /tmp/h.json ] && head -c 400 /tmp/h.json || true
-          if [ "$STATUS" != "200" ]; then
-            echo "::warning::External /health returned HTTP $STATUS (may need DNS/TLS propagation, or .env DATABASE_URL_PRIMARY not pointing at Aiven yet)."
+
+          STATUS="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "${PUBLIC_HEALTH_URL}" || echo 000)"
+
+          echo "HTTP ${STATUS}"
+
+          if [ -s /tmp/health.json ]; then
+            head -c 1000 /tmp/health.json
+            echo
           fi
+
+          if [ "$STATUS" != "200" ]; then
+            echo "::warning::External health check returned HTTP ${STATUS}."
+          fi
+
+      - name: Deployment summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## OCI deployment"
+            echo
+            echo "- Image: \`${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG || 'latest' }}\`"
+            echo "- Host: \`${{ secrets.OCI_HOST }}\`"
+            echo "- User: \`${{ secrets.OCI_USER }}\`"
+            echo "- Container: \`${{ env.CONTAINER_NAME }}\`"
+            echo "- Health URL: \`${{ env.PUBLIC_HEALTH_URL }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Notify on failure
         if: failure()
         shell: bash
         run: |
-          echo "::error::Deployment to OCI failed. Check the deploy step logs above."
+          echo "::error::Deployment to OCI failed."
+          echo
           echo "Manual recovery on the Hub VM:"
           echo "  docker pull ${{ env.DOCKER_IMAGE }}:latest"
-          echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null; docker rm \$n 2>/dev/null; done"
+          echo "  for n in ${{ env.CONTAINER_NAME }} matrixhub; do docker stop \$n 2>/dev/null || true; docker rm \$n 2>/dev/null || true; done"
           echo "  docker run -d --name ${{ env.CONTAINER_NAME }} --restart unless-stopped \\"
           echo "    -p 443:443 -p 4444:4444 --env-file ~/matrix-hub/.env \\"
           echo "    -v matrixhub_data:/app/data ${{ env.DOCKER_IMAGE }}:latest"
