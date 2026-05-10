@@ -1,0 +1,106 @@
+name: Migrations CI
+
+# Catches the class of bug that produced the production schema-drift
+# 502: a migration that isn't idempotent or isn't reversible can leave
+# a partially-migrated DB after a retry / partial deploy / rollback.
+# This workflow runs three checks per PR against a fresh Postgres 17
+# (matching Aiven prod):
+#
+#   1. `alembic upgrade head`        — full chain applies cleanly.
+#   2. `alembic downgrade -1`        — last migration reverses cleanly.
+#   3. `alembic upgrade head` again  — re-applying is idempotent.
+#
+# Then runs a schema drift check to confirm every required ORM column
+# exists, and exercises a couple of search queries through the actual
+# routing code to catch UndefinedColumn-style regressions before they
+# ship.
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    paths:
+      - "alembic/**"
+      - "src/models.py"
+      - "src/db.py"
+      - "src/services/search/**"
+      - "src/routes/catalog.py"
+      - "scripts/_alembic_heal.py"
+      - "scripts/repair_db.py"
+      - "scripts/check_schema_drift.py"
+      - ".github/workflows/migrations-ci.yml"
+
+jobs:
+  migrations:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: matrix
+          POSTGRES_PASSWORD: matrix
+          POSTGRES_DB: matrixhub_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U matrix -d matrixhub_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://matrix:matrix@localhost:5432/matrixhub_ci
+      MATRIX_REMOTES: "[]"
+      LOG_LEVEL: WARNING
+      HOST: 127.0.0.1
+      PORT: "443"
+      SEARCH_LEXICAL_BACKEND: pgtrgm
+      SEARCH_BACKEND__LEXICAL: pgtrgm
+      SEARCH_VECTOR_BACKEND: none
+      SEARCH_BACKEND__VECTOR: none
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install project (with psycopg)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+          pip install "psycopg[binary]" alembic
+
+      - name: 1) alembic upgrade head (fresh DB)
+        run: alembic upgrade head
+
+      - name: 2) alembic downgrade -1
+        run: alembic downgrade -1
+
+      - name: 3) alembic upgrade head (idempotent re-apply)
+        run: alembic upgrade head
+
+      - name: 4) Schema drift check (no missing columns)
+        run: python scripts/check_schema_drift.py --strict
+
+      - name: 5) repair_db.py is a no-op on a healthy DB
+        run: |
+          python scripts/repair_db.py --dry-run | tee /tmp/dryrun.txt
+          # On a freshly-migrated DB the plan must be empty.
+          if grep -q "planned actions (0)" /tmp/dryrun.txt; then
+            echo "OK: repair_db.py reports no work on a healthy DB."
+          elif grep -q "nothing to do" /tmp/dryrun.txt; then
+            echo "OK: repair_db.py is a no-op."
+          else
+            echo "FAIL: repair_db.py wants to change a healthy schema:"
+            cat /tmp/dryrun.txt
+            exit 1
+          fi
+
+      - name: 6) Search regression tests (HTTP 200 even with no matches)
+        run: pytest -q tests/test_search_regressions.py

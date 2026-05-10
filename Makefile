@@ -338,6 +338,15 @@ upgrade: $(VENV_DIR)/installed ensure-env
 	@$(ENV) \
 	$(activate) && $(ALEMBIC) $(ALEMBIC_CFG) upgrade head
 
+# Idempotent schema repair for production Postgres DBs whose
+# alembic_version drifted past a deleted revision (symptom:
+# "column entity.manifest_blob_ref does not exist" → 502). Reads
+# DATABASE_URL from .env. Use `make repair-db DRY=1` to preview.
+.PHONY: repair-db
+repair-db: $(VENV_DIR)/installed ensure-env
+	@echo "$(DIM_GREEN)-> Repairing DB schema (idempotent)...$(RESET)"
+	@$(activate) && $(VENV_DIR)/bin/python $(SCRIPTS_DIR)/repair_db.py $(if $(DRY),--dry-run,)
+
 # Zion Gateway (MCP) Lifecycle
 .PHONY: deps gateway-install gateway-setup gateway-start gateway-token gateway-verify gateway-stop
 deps: fix-line-endings

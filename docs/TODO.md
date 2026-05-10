@@ -1,6 +1,9 @@
 # TODO — next session
 
-## Status snapshot (2026-05-09)
+> Last updated 2026-05-10 after PR #22 merged everything below the
+> `~~strikethrough~~` items into `master`.
+
+## Status snapshot (2026-05-10)
 
 `https://www.matrixhub.io/status` is fully green:
 
@@ -11,259 +14,239 @@
 | Frontend  | **Operational** (Next.js on Vercel)    |
 | Catalog   | **7466 items** indexed                 |
 
-The only remaining bug:
+The only red signal:
 
-> `https://www.matrixhub.io/?q=watsonx&type=any` → "Search unavailable —
-> The search service returned status 502."
+> `https://www.matrixhub.io/?q=watsonx&type=any` →
+> "Search unavailable — The search service returned status 502."
 
-A direct `curl` against `https://api.matrixhub.io/catalog/search?...`
-currently returns **HTTP 500** with `{"error":"Internal Server Error",
-"request_id":"..."}`. The frontend's `/api/search` proxy translates
-any non-2xx into 502 with a generic message; the real upstream is the
-500 we need to root-cause.
-
-Do not touch prod again until Phase 1 is green locally.
-
----
-
-## Static-review fixes already applied on this branch
-
-A static review of the previous plan flagged four real bugs that would
-have made Phase 2 fail silently or get overwritten on every deploy.
-Fixed in commits on `claude/fix-matrixhub-oH85Q` before re-running
-local repro:
-
-1. **`type(exc).__name__` shadowed the route's `type` query parameter**
-   in `src/routes/catalog.py`. The defensive try/except itself raised
-   `TypeError: 'NoneType' object is not callable` from inside the
-   handler, hiding the real exception. Fixed: use
-   `exc.__class__.__name__`.
-
-2. **`SEARCH_LEXICAL_BACKEND=pgtrgm` silently used `NullLexicalBackend`.**
-   `src/services/search/__init__.py::get_lexical_backend()` does
-   `from .backends.pgtrgm import PGTrgmBackend`, but
-   `src/services/search/backends/pgtrgm.py` only exports a
-   module-level `search()` function (no class). Import fails, factory
-   falls back to the null backend, and keyword search returns empty
-   results regardless of the env var.
-   Fix: `src/routes/catalog.py` now ALWAYS dispatches keyword search
-   via `engine.run_keyword(...)` (Option A from review). That path
-   already routes to `run_pgtrgm()` when the env says `pgtrgm`, and
-   to LIKE when it says `none`, with no second path through the broken
-   factory.
-
-3. **`.github/workflows/deploy.yml` overwrote `SEARCH_LEXICAL_BACKEND`
-   back to `none` on every deploy**, so the proposed Phase 2
-   "flip to pgtrgm on the VM" would not survive the next workflow run.
-   Worse, `src/config.py` prefers `SEARCH_BACKEND__LEXICAL`
-   (Pydantic AliasChoices), so setting only `SEARCH_LEXICAL_BACKEND`
-   on the VM would lose to the alias anyway.
-   Fix: deploy.yml now resolves the lexical backend in this order
-   `workflow_dispatch input lexical_backend → vars.SEARCH_LEXICAL_BACKEND
-   → default 'none'`, threads it into the SSH script, and writes
-   BOTH `SEARCH_LEXICAL_BACKEND` and `SEARCH_BACKEND__LEXICAL` to that
-   value.
-
-4. **The local-repro plan was wrong.** A `--data-only` `pg_dump` does
-   not bring schema with it, and Alembic+restore order matters. Phase 1
-   below has the corrected ordering and a separate `--schema-only`
-   flow for schema-drift detection.
+The frontend `/api/search` proxy returns 502 whenever the backend
+`/catalog/search` returns any non-2xx OR times out at 8 s. Until the
+new Docker image is published from `master`, the running container
+returns a bare `{"error":"Internal Server Error","request_id":"..."}` —
+the structured `{detail:{error,reason}}` envelope from this branch
+isn't live yet.
 
 ---
 
-## Plan: fix the search 502
+## ✅ Resolved since last update (now on `master`)
 
-Two phases. **Do not touch prod until Phase 1 is green locally.**
+### Search-route correctness
+- Defensive `try/except` around `/catalog/search` returns
+  `{detail:{error:"SearchFailed",reason:"<class>: <msg>"}}` instead of
+  bare 500.
+- Exception handler uses `exc.__class__.__name__` (was `type(exc)`,
+  which the `type=` query param shadowed → `TypeError: 'NoneType' is
+  not callable` from inside the handler).
+- Keyword search **always** dispatches via `engine.run_keyword()`. The
+  legacy `lexical.search()` singleton silently fell through to
+  `NullLexicalBackend` because `services/search/__init__.py` imports
+  a non-existent `PGTrgmBackend` class (the backend module exports
+  only a module-level `search()` function).
 
-### Phase 1 — Reproduce and fix locally (no prod changes)
+### Container image (`Dockerfile`)
+- HTTPS healthcheck (`curl -kfsS https://127.0.0.1:443/health`) —
+  was HTTP, guaranteed-fail against gunicorn-on-TLS.
+- start-period 60s, retries 5 (was 40s/3) — Alembic against fresh
+  Aiven needs longer.
+- Single-RUN user creation + `mkdir -p /app/data/blobs` + `chown -R app:app /app`
+  (was chown-before-user, `invalid user` build failure on amd64+arm64).
+- `ENTRYPOINT` correctly wires `docker-entrypoint.sh` →
+  `select_database_url.sh` (Aiven primary / OL9 fallback).
+- New Alembic migration `9c4a1f7b3d2e_pg_trgm_extension_and_indexes.py`:
+  idempotent `CREATE EXTENSION pg_trgm` + GIN trigram indexes on
+  `entity.{name,summary,description}`. No-op on SQLite.
+- `Dockerfile.prod` aligned with `Dockerfile` (was missing ENTRYPOINT,
+  `postgresql-client`, `scripts/`, `httpx[http2]`, `psycopg[binary]`
+  in gateway venv, GATEWAY_REF arg, `mkdir blobs`, SQLite scrubs).
+- `supervisord.conf`: gateway pinned to `--port 4444` via CLI flag,
+  `unset HOST PORT` before sourcing `mcpgateway/.env` so the gateway
+  can never race the Hub for `:443`.
+- `alembic/env.py` unconditionally uses `settings.DATABASE_URL` (was
+  falling through to the SQLite default in `alembic.ini`, which
+  caused `Context impl SQLiteImpl` in prod logs and a phantom
+  parallel SQLite migration history).
 
-1. **Spin up a local Postgres** matching Aiven's major version.
-   ```bash
-   docker run -d --name mh-pg \
-     -p 55432:5432 \
-     -e POSTGRES_USER=matrix \
-     -e POSTGRES_PASSWORD=matrix \
-     -e POSTGRES_DB=matrixhub \
-     postgres:17
-   docker exec mh-pg psql -U matrix matrixhub -c \
-     'CREATE EXTENSION IF NOT EXISTS pg_trgm;'
-   ```
+### Deploy workflow (`.github/workflows/deploy.yml`)
+- `SEARCH_LEXICAL_BACKEND` is now configurable, resolved in this
+  order:
+    1. `workflow_dispatch input lexical_backend` (one-shot override)
+    2. repo variable `SEARCH_LEXICAL_BACKEND`
+    3. literal default `none`.
+  Both `SEARCH_LEXICAL_BACKEND` and `SEARCH_BACKEND__LEXICAL` are
+  written so Pydantic `AliasChoices` precedence can't sabotage the
+  config.
+- `AIVEN_DATABASE_URL` accepts any of `postgres://`, `postgresql://`,
+  or `postgresql+psycopg://` (auto-converts the libpq forms to the
+  SQLAlchemy form expected by psycopg3).
+- `--no-healthcheck` + runtime `supervisord.matrixhub.tls.conf` /
+  `start-hub-tls.sh` / `start-gateway-4444.sh` mounts — defensive
+  overrides that keep the deploy working until a fresh image with
+  the baked-in fixes is published. **These can be removed after the
+  next `Publish Docker` run completes.**
+- Strict TLS check + `exit 1` on Cloudflare 525.
+- `matrixhub_data` volume gets `mkdir blobs && chown 999:999 && chmod`
+  before container start — fixes `PermissionError: /app/data/blobs`.
 
-2. **Apply Alembic migrations BEFORE restoring any dump.** A data-only
-   dump has rows, not table definitions — if the DB has no tables
-   the restore fails immediately.
-   ```bash
-   DATABASE_URL='postgresql+psycopg://matrix:matrix@127.0.0.1:55432/matrixhub' \
-     alembic upgrade head
-   ```
+### Local dev experience (`Makefile`, `scripts/setup-mcp-gateway.sh`)
+- `make install` is now the **prod-ready one-shot** (Hub venv +
+  Gateway venv + `.env`). It does **not** start any service —
+  `make run` is the only target that binds ports.
+  `make bootstrap` is kept as an alias.
+- `make stop` — TERMs Hub + Gateway processes (PID files, then
+  `pgrep -x <basename>`, then force-kill anything still on
+  :443/:4444/`$PORT`). Uses `pgrep -x` instead of `-f` to avoid the
+  self-match landmine that previously killed the recipe mid-run.
+- `make clean` depends on `make stop` so a rebuild always starts from
+  a quiet state. `make clean-all` also nukes `.env`.
+- `make run-hub` / `make dev-hub` — Hub-only escape hatches (skip
+  Gateway entirely; useful when debugging only `/catalog` or
+  `/health`).
+- `make` targets that invoke shell scripts now run `fix-line-endings`
+  first — strips CRLF in-place, so WSL/Windows checkouts no longer
+  fail with cryptic `command not found`.
+- `setup-mcp-gateway.sh` self-heals four common failure modes:
+    1. missing `python3.11-venv` apt package → `apt install` and retry
+    2. uv-managed Python (sys.prefix=/install) → prefer `/usr/bin/python3.11`
+    3. `--without-pip` + `get-pip.py` bootstrap if ensurepip dies
+    4. half-built `.venv` from a previous failed run → wipe and retry
+- `setup-mcp-gateway.sh` accepts `--no-start` (used by
+  `gateway-ensure` from the Makefile so install never starts services
+  that `make run` would then collide with on :4444).
+- `uv pip install` used everywhere uv is on PATH (10-20× faster than
+  pip; sidesteps the `Cannot uninstall wheel installed by debian`
+  crash that pip hits in uv-bootstrapped venvs).
+- `UV_LINK_MODE=copy` exported by both Makefile and setup script —
+  silences the noisy WSL hardlink-fallback warning when the project
+  tree (`/mnt/c`) and uv cache (`~/.cache/uv` on Linux ext4) are on
+  different filesystems.
+- Verbose `[1/3] [2/3] [3/3]` progress markers during venv build —
+  no more "frozen at -> Constructing reality" UX.
 
-3. **(Performance test) Load a slice of Aiven data.** Run on the OCI
-   VM (or directly against Aiven if you have outbound 24870):
-   ```bash
-   pg_dump "$AIVEN_DATABASE_URL" \
-     --data-only --no-owner --no-privileges \
-     --table=public.entity \
-     --table=public.embedding_chunk \
-     --table=public.remote \
-     --rows-per-insert 500 \
-     | gzip > aiven-sample.sql.gz
-   ```
-   Then locally:
-   ```bash
-   gunzip -c aiven-sample.sql.gz | docker exec -i mh-pg psql -U matrix matrixhub
-   docker exec mh-pg psql -U matrix matrixhub -c 'select count(*) from entity;'
-   ```
+---
 
-4. **(Schema-drift test) Compare schemas separately** — a data-only
-   dump will NOT detect missing columns. Two ways:
+## 🔲 Open: production search-502 fix
 
-   a. Dump Aiven's schema and diff against the locally-migrated DB:
-      ```bash
-      pg_dump "$AIVEN_DATABASE_URL" \
-        --schema-only --no-owner --no-privileges \
-        --table=public.entity \
-        --table=public.embedding_chunk \
-        --table=public.remote \
-        > aiven-schema.sql
-      docker exec mh-pg pg_dump -U matrix --schema-only matrixhub \
-        --table=public.entity --table=public.embedding_chunk --table=public.remote \
-        > local-schema.sql
-      diff -u local-schema.sql aiven-schema.sql
-      ```
+Two phases. **Do not touch prod until Phase 1 is green locally.**
 
-   b. Or query `information_schema.columns` directly against Aiven and
-      compare the column list with what the app expects (22 columns
-      including `gateway_registered_at`, `gateway_error`,
-      `mcp_registration`, `manifest_blob_ref`, `tenant_id`,
-      `readme_blob_ref`).
+### Phase 1 — Reproduce locally (against Aiven, on WSL or any host
+                                  with outbound `:24870`)
 
-5. **Run matrix-hub locally** with prod-like env, in two
-   configurations.
+```bash
+cd /mnt/c/workspace/matrix-hub   # or wherever you cloned
+git pull origin master           # all the fixes above are now in master
 
-   First `none` (current prod behavior — LIKE fallback):
-   ```bash
-   SEARCH_LEXICAL_BACKEND=none \
-   SEARCH_BACKEND__LEXICAL=none \
-   SEARCH_DEFAULT_MODE=keyword \
-   SEARCH_INCLUDE_PENDING_DEFAULT=true \
-   .venv/bin/uvicorn src.app:app --host 0.0.0.0 --port 8000
-   ```
+# Confirm the WSL/host can reach Aiven
+timeout 10 bash -c 'cat </dev/null >/dev/tcp/pg-37455d5-matrixhub-db.c.aivencloud.com/24870 && echo TCP_OK' \
+  || echo "TCP closed — open egress to :24870 first"
 
-   Then `pgtrgm` (target Phase 2 behavior):
-   ```bash
-   SEARCH_LEXICAL_BACKEND=pgtrgm \
-   SEARCH_BACKEND__LEXICAL=pgtrgm \
-   SEARCH_DEFAULT_MODE=keyword \
-   SEARCH_INCLUDE_PENDING_DEFAULT=true \
-   .venv/bin/uvicorn src.app:app --host 0.0.0.0 --port 8000
-   ```
+# .env with Aiven URL + pgtrgm:
+#   DATABASE_URL=postgresql+psycopg://avnadmin:<PW>@pg-37455d5-...aivencloud.com:24870/defaultdb?sslmode=require
+#   SEARCH_LEXICAL_BACKEND=pgtrgm
+#   SEARCH_BACKEND__LEXICAL=pgtrgm
+#   SEARCH_DEFAULT_MODE=keyword
+#   SEARCH_INCLUDE_PENDING_DEFAULT=true
+#   MATRIX_ENV=development
+#   REQUIRE_API_TOKEN_IN_PROD=false
+#   PUBLIC_BASE_URL=http://127.0.0.1:8000
+make stop
+make clean
+make install        # ~50-90s; idempotent
+make dev-hub        # Hub-only on :8000 (no sudo needed)
+```
 
-   Both should succeed because catalog.py now always goes through
-   `engine.run_keyword()`, which dispatches correctly for either
-   value.
+In another terminal:
 
-6. **Reproduce with the exact frontend query.**
-   ```bash
-   curl -i 'http://127.0.0.1:8000/catalog/search?q=watsonx&type=any&limit=5&mode=keyword&include_pending=true'
-   ```
-   With the new try/except wrapper a failure returns:
-   `{"detail":{"error":"SearchFailed","reason":"<ExcType>: <msg>"}}`
-   instead of a bare 500.
+```bash
+# health
+curl -fsS 'http://127.0.0.1:8000/health?check_db=true'
+# → {"status":"ok","db":"ok"}
 
-7. **Pin the failure** to one of three suspects, ranked by likelihood
-   given that the live API currently returns 500:
+# the failing prod query
+curl -i 'http://127.0.0.1:8000/catalog/search?q=watsonx&type=any&limit=5&mode=keyword&include_pending=true'
+```
 
-   a. **Schema drift on Aiven** — prod's Alembic ran against SQLite
-      (`Context impl SQLiteImpl` in deploy logs), so Aiven's `entity`
-      table was created by a populator script and may be missing
-      columns the route SELECTs. Verify via step 4. Fix:
-      `alembic upgrade head` against Aiven (one-off):
-      ```bash
-      docker exec matrix-hub /app/.venv/bin/alembic -c /app/alembic.ini upgrade head
-      ```
-      The branch's `alembic/env.py` is already patched to use
-      `settings.DATABASE_URL` unconditionally.
+Three possible outcomes (the new `{detail:{error,reason}}` envelope
+makes them legible):
 
-   b. **Slow LIKE scan** timing out behind the frontend's 8 s abort.
-      Less likely now that the live API returns 500 (not a 5xx from
-      Cloudflare due to timeout). Verify by timing the local pgtrgm vs
-      LIKE comparison. Fix: switch `SEARCH_LEXICAL_BACKEND=pgtrgm` and
-      ensure the new `pg_trgm` Alembic migration
-      (`9c4a1f7b3d2e_pg_trgm_extension_and_indexes.py`) ran on Aiven.
+1. **HTTP 200 + items** → search works locally against Aiven; the
+   prod 502 is purely image-staleness. Skip to Phase 2.
 
-   c. **Bad row data** — a NULL where Pydantic expects a list, etc.
-      Already partly mitigated (`serialize_hit()` and Pydantic
-      validators coerce list columns). Verify by walking `limit`
-      upwards until it crashes.
+2. **HTTP 500 with `{"detail":{"error":"SearchFailed","reason":"<class>: <msg>"}}`**
+   — paste the `reason`. Most likely values and one-shot fixes:
+
+   | reason                                                | one-shot fix                                                                                  |
+   |-------------------------------------------------------|-----------------------------------------------------------------------------------------------|
+   | `UndefinedFunction: function similarity(...) does not exist` | `psql "$DATABASE_URL" -c 'CREATE EXTENSION IF NOT EXISTS pg_trgm;'`                          |
+   | `UndefinedColumn: column entity.X does not exist`     | `DATABASE_URL='<sqlalchemy-form-aiven-url>' .venv/bin/alembic upgrade head`                   |
+   | `ValidationError: ... capabilities ...`               | bad row in `entity`; we'll patch `serialize_hit` to coerce to `[]`                            |
+
+   The new `9c4a1f7b3d2e_pg_trgm_extension_and_indexes.py` migration
+   does both `CREATE EXTENSION` and the GIN indexes idempotently when
+   `alembic upgrade head` runs at Hub startup. So once the new image
+   is deployed AND the Hub is allowed to migrate Aiven, both #1 and #2
+   become impossible.
+
+3. **Connection timeout to Aiven** → your host doesn't have outbound
+   to `:24870`. Open the firewall / use a VPN / SSH tunnel and retry.
 
 ### Phase 2 — Apply the verified fix to prod
 
-Only after Phase 1 reproduces and is fixed locally:
+Only after Phase 1 returns 200 locally:
 
-1. Build & publish a new image (`Publish Docker (Docker Hub)` workflow).
-2. Set the repo variable `SEARCH_LEXICAL_BACKEND=pgtrgm` (Settings →
-   Secrets and variables → Actions → Variables) so the deploy workflow
-   pins the env on every run. Or use the `workflow_dispatch` input
-   `lexical_backend=pgtrgm` for a one-shot.
-3. Run `Deploy to Oracle Cloud` (workflow_dispatch).
-4. Verify:
+1. **Build & publish a new image.** Trigger
+   `📦 Publish Docker (Docker Hub)` workflow_dispatch on `master`.
+2. **Set the repo variable** `SEARCH_LEXICAL_BACKEND=pgtrgm`
+   (Settings → Secrets and variables → Actions → Variables) so every
+   future `Deploy to Oracle Cloud` run uses the production search
+   path. (Or use the `lexical_backend` workflow_dispatch input for a
+   one-shot.)
+3. **Run** `Deploy to Oracle Cloud` (workflow_dispatch).
+4. **Verify**:
    ```bash
    curl -fsS 'https://api.matrixhub.io/catalog/search?q=watsonx&type=any&limit=5&mode=keyword&include_pending=true' | jq .
    curl -fsS 'https://www.matrixhub.io/api/search?q=watsonx&type=any&limit=5'
    ```
-5. `/status` should still be green and show 7466 items.
+   `/status` should still be green and Catalog should still show 7466.
+5. **Drop the runtime override mounts** from `deploy.yml` in a
+   follow-up commit (the new image bakes them in):
+   - `--no-healthcheck`
+   - `-v /home/ubuntu/supervisord.matrixhub.tls.conf:/etc/supervisor/conf.d/supervisord.conf:ro`
+   - `-v /home/ubuntu/start-hub-tls.sh:/app/start-hub-tls.sh:ro`
+   - `-v /home/ubuntu/start-gateway-4444.sh:/app/start-gateway-4444.sh:ro`
 
 ---
 
-## Already-pushed, awaiting next image build
-
-These take effect once a fresh `ruslanmv/matrix-hub:latest` is published
-from this branch:
-
-- `supervisord.conf` — `[program:gateway]` pinned to `--port 4444`,
-  `unset HOST PORT` before sourcing `mcpgateway/.env`.
-- `Dockerfile` — `HEALTHCHECK` switched to HTTPS
-  (`curl -kfsS https://127.0.0.1:443/health`), single-RUN user creation +
-  `chown -R app:app /app`.
-- `alembic/env.py` — unconditionally
-  `config.set_main_option("sqlalchemy.url", settings.DATABASE_URL)` so
-  migrations no longer fall through to SQLite.
-- `alembic/versions/9c4a1f7b3d2e_pg_trgm_extension_and_indexes.py` —
-  creates `pg_trgm` + 3 GIN trigram indexes on
-  `entity.{name,summary,description}`. Idempotent, no-op on SQLite.
-- `src/routes/catalog.py` — defensive try/except with structured
-  `{detail:{error,reason}}` body, exception handler uses
-  `exc.__class__.__name__` (no shadowing), keyword search ALWAYS via
-  `engine.run_keyword()`.
-- `.github/workflows/deploy.yml` — `SEARCH_LEXICAL_BACKEND` is
-  configurable via repo variable / workflow input; both alias names
-  written to .env.
-- `Makefile` — `bootstrap` target, auto-installs gateway, strips CRLF,
-  hub-only `dev-hub` / `run-hub` escape hatches.
-- `scripts/simulate.sh` — local repro of the prod container layout.
-
-Once the new image is live, `.github/workflows/deploy.yml` can drop
-the runtime override mounts in a follow-up commit:
-
-- `--no-healthcheck`
-- `-v /home/ubuntu/supervisord.matrixhub.tls.conf:/etc/supervisor/conf.d/supervisord.conf:ro`
-- `-v /home/ubuntu/start-hub-tls.sh:/app/start-hub-tls.sh:ro`
-- `-v /home/ubuntu/start-gateway-4444.sh:/app/start-gateway-4444.sh:ro`
-
----
-
-## Security TODOs (not blocking, but do them soon)
+## 🔲 Security TODOs (not blocking, but do them soon)
 
 - **Remove private keys from the repo.** Reviewer found
   `scripts/certificates/cf-origin.key` in the tree. Even if old, treat
   it as compromised: delete it, scrub it from git history
   (`git filter-repo` or BFG), and rotate the cert.
-- Rotate the **Aiven password** (`avnadmin`). The current value was
-  pasted in chat at least twice today.
-- Rotate the **Cloudflare Origin Cert** for `api.matrixhub.io`. Private
-  key was pasted in chat earlier.
-- Rotate the **GitHub PATs** that were pasted in chat.
+- Rotate the **Aiven password** (`avnadmin`) — pasted in chat at least
+  three times during debugging.
+- Rotate the **Cloudflare Origin Cert** for `api.matrixhub.io` — the
+  private key was pasted in chat earlier.
+- Rotate the **GitHub PATs** pasted in chat.
 - Set strong `JWT_SECRET_KEY` and `AUTH_ENCRYPTION_SECRET` in
-  `~/matrix-hub/.env` — mcpgateway is logging weak-secret warnings.
-- Set a non-default `BASIC_AUTH_PASSWORD` if `API_ALLOW_BASIC_AUTH` is
-  ever enabled.
+  `~/matrix-hub/.env` — mcpgateway logs weak-secret warnings on every
+  boot.
+- Set a non-default `BASIC_AUTH_PASSWORD` before enabling
+  `API_ALLOW_BASIC_AUTH`.
+
+---
+
+## 🔲 Nice-to-have follow-ups (no urgency)
+
+- **Move project tree to Linux ext4 on WSL** (`~/matrix-hub` instead
+  of `/mnt/c/workspace/matrix-hub`) — `make install` would drop from
+  ~60 s to ~10-15 s on a cold cache. Filesystem-bound.
+- **Delete `Dockerfile.prod`** if no operator actually uses
+  `scripts/build_container_prod.sh`. The canonical `Dockerfile`
+  covers prod equally well via `--build-arg HUB_INSTALL_TARGET=prod`.
+  (We aligned the two files in the meantime to avoid divergence.)
+- **Add a unit test** that exercises `/catalog/search` against an
+  in-memory SQLite seeded with a few entities — would catch
+  regressions in the search route before they reach prod.
+- **Switch `Publish Docker` to also tag `:master`** in addition to
+  `:latest` and the semver tag, so the deploy can pin to a specific
+  master commit if needed.
