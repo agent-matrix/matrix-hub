@@ -82,6 +82,43 @@ if [ -f /app/mcpgateway/mcp.db ]; then
   rm -f /app/mcpgateway/mcp.db || true
 fi
 
+# 5b. Schema drift gate. After resolving DATABASE_URL, verify that the
+#     live DB has every column the ORM declares. This catches the exact
+#     class of failure that produced the 2026-05-10 502 incident
+#     ("column entity.manifest_blob_ref does not exist") at container
+#     boot, BEFORE supervisord spawns gunicorn — instead of letting it
+#     happen on every search request.
+#
+#     Behaviour:
+#       rc=0  → schema is healthy, continue.
+#       rc=2  → drift detected; abort container boot with a clear
+#               "Run `make repair-db` against this DATABASE_URL"
+#               message. The orchestrator (compose/k8s/deploy.yml) will
+#               surface the failure instead of starting a Hub that
+#               500s every request.
+#       rc=*  → unexpected error (sqlalchemy missing, network glitch,
+#               etc.) — log and continue. The Hub's own startup will
+#               still try to run, so we don't fail-closed on transient
+#               infra problems.
+if [ -x /app/.venv/bin/python ] && [ -f /app/scripts/check_schema_drift.py ]; then
+  echo "ℹ️ Running schema drift check before supervisord..."
+  set +e
+  /app/.venv/bin/python /app/scripts/check_schema_drift.py
+  drift_rc=$?
+  set -e
+  case "${drift_rc}" in
+    0) echo "✅ Schema drift check passed." ;;
+    2)
+      echo "::error::Schema drift detected. Refusing to start container."
+      echo "::error::Run 'make repair-db' against this DATABASE_URL and redeploy."
+      exit 2
+      ;;
+    *) echo "⚠️ Schema drift check returned rc=${drift_rc}; continuing." ;;
+  esac
+else
+  echo "ℹ️ scripts/check_schema_drift.py not present; skipping drift gate."
+fi
+
 # Optional: show effective DB URL (with password masked) so logs confirm
 # Postgres is wired without leaking credentials.
 masked() { echo "$1" | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#'; }

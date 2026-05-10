@@ -20,8 +20,11 @@ GATEWAY_UVICORN="${GATEWAY_VENV}/bin/uvicorn"
 GATEWAY_PYTHON="${GATEWAY_VENV}/bin/python"
 GATEWAY_HOST_DEFAULT="0.0.0.0"
 GATEWAY_PORT_DEFAULT="4444"
-# Allow override of gateway app module if fallback is used
-GW_APP_MODULE="${GW_APP_MODULE:-mcp_gateway.app:app}"
+# Allow override of gateway app module if fallback is used.
+# IBM/mcp-context-forge installs as `mcpgateway` (one word, no underscore).
+# The FastAPI app object lives in `mcpgateway/main.py`.
+# Override with GW_APP_MODULE env var if your fork is laid out differently.
+GW_APP_MODULE="${GW_APP_MODULE:-mcpgateway.main:app}"
 
 # Hub
 HUB_ENV_FILE="${HUB_ENV_FILE:-${ROOT_DIR}/.env}"
@@ -81,6 +84,24 @@ elif [ -f "${GATEWAY_ENV_LOCAL}" ]; then
 fi
 
 # ---------------------------
+# Alembic self-heal helper (idempotent)
+# ---------------------------
+heal_alembic() {
+  local label="$1" python_bin="$2" ini="$3" cwd="$4"
+  if [ ! -x "${python_bin}" ] || [ ! -f "${ini}" ]; then return 0; fi
+  log "Running Alembic self-heal for ${label}..."
+  set +e
+  "${python_bin}" "${ROOT_DIR}/scripts/_alembic_heal.py" --ini "${ini}" --cwd "${cwd}"
+  local rc=$?
+  set -e
+  case "${rc}" in
+    0) return 0 ;;
+    2) err "Alembic self-heal for ${label} REFUSED to stamp head on Postgres (schema drift). Run 'make repair-db' first." ;;
+    *) warn "Alembic self-heal for ${label} reported a problem (rc=${rc}); continuing." ;;
+  esac
+}
+
+# ---------------------------
 # Start MCP‑Gateway (subshell; no env leakage)
 # ---------------------------
 GW_PID=""
@@ -95,6 +116,21 @@ if [ "${GATEWAY_SKIP_START}" != "1" ]; then
     if [ ! -f "${GATEWAY_ENV_FILE}" ] && [ -f "${GATEWAY_ENV_LOCAL}" ]; then
       cp "${GATEWAY_ENV_LOCAL}" "${GATEWAY_ENV_FILE}"
       log "Created ${GATEWAY_ENV_FILE} from ${GATEWAY_ENV_LOCAL}"
+    fi
+
+    # Self-heal gateway alembic_version BEFORE bootstrap_db() runs at
+    # gunicorn-worker import time. Handles "schema present but
+    # alembic_version empty" (causes "duplicate column name: slug").
+    GW_INI=""
+    if   [ -f "${GATEWAY_DIR}/alembic.ini" ]; then GW_INI="${GATEWAY_DIR}/alembic.ini"
+    elif [ -f "${GATEWAY_DIR}/mcpgateway/alembic.ini" ]; then GW_INI="${GATEWAY_DIR}/mcpgateway/alembic.ini"
+    fi
+    if [ -n "${GW_INI}" ]; then
+      (
+        cd "${GATEWAY_DIR}"
+        if [ -f ".env" ]; then set -a; . ".env"; set +a; fi
+        heal_alembic "gateway" "${GATEWAY_PYTHON}" "${GW_INI}" "$(dirname "${GW_INI}")"
+      )
     fi
 
     (
@@ -184,6 +220,21 @@ fi
 # Fail fast if port busy
 if port_listening "${HUB_PORT}"; then
   err "Port ${HUB_PORT} is already in use. Change PORT in .env or free the port."
+fi
+
+# Self-heal Hub Alembic version state (handles bogus version_num pointers
+# that crash with "Can't locate revision identified by '<rev>'").
+heal_alembic "hub" "${HUB_PYTHON}" "${ROOT_DIR}/alembic.ini" "${ROOT_DIR}"
+
+# Schema drift gate (see scripts/check_schema_drift.py).
+if [ -f "${ROOT_DIR}/scripts/check_schema_drift.py" ]; then
+  set +e
+  "${HUB_PYTHON}" "${ROOT_DIR}/scripts/check_schema_drift.py"
+  drift_rc=$?
+  set -e
+  if [ "${drift_rc}" -eq 2 ]; then
+    err "Schema drift detected; refusing to start Hub. Run 'make repair-db'."
+  fi
 fi
 
 log "Starting Matrix Hub (dev) on http://${HUB_HOST}:${HUB_PORT}"

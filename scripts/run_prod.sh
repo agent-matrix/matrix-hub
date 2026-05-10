@@ -19,11 +19,18 @@ GATEWAY_VENV="${GATEWAY_VENV:-${GATEWAY_DIR}/.venv}"
 GATEWAY_GUNICORN="${GATEWAY_VENV}/bin/gunicorn"
 GATEWAY_UVICORN="${GATEWAY_VENV}/bin/uvicorn"
 GATEWAY_PYTHON="${GATEWAY_VENV}/bin/python"
-GW_APP_MODULE="${GW_APP_MODULE:-mcp_gateway.app:app}"
+GW_APP_MODULE="${GW_APP_MODULE:-mcpgateway.main:app}"
 GATEWAY_HOST_DEFAULT="0.0.0.0"
 GATEWAY_PORT_DEFAULT="4444"
 
-GW_WORKERS="${GW_WORKERS:-}"                  # auto-calc if empty
+# GW_WORKERS=1 by default. Multi-worker gunicorn against
+# mcpgateway.main is unsafe because the module's import-time
+# `asyncio.run(bootstrap_db())` triggers Alembic upgrades, and N
+# workers all racing the same Alembic upgrade head produce
+# `sqlite3.OperationalError: duplicate column` /
+# `relation already exists` failures. Override only if you know
+# bootstrap is idempotent in your fork.
+GW_WORKERS="${GW_WORKERS:-1}"
 GW_TIMEOUT="${GW_TIMEOUT:-60}"
 GW_GRACEFUL_TIMEOUT="${GW_GRACEFUL_TIMEOUT:-30}"
 GW_KEEPALIVE="${GW_KEEPALIVE:-5}"
@@ -127,6 +134,38 @@ if [ ! -f "${HUB_ENV_FILE}" ] && [ -f "${HUB_ENV_EXAMPLE}" ]; then
 fi
 
 # ---------------------------
+# Alembic self-heal (idempotent)
+# ---------------------------
+# Recovers from two corrupt-version-table states that crash startup:
+#   * Schema is present but alembic_version is empty/missing
+#     (gateway.sqlite created via SQLAlchemy.create_all, then a fresh
+#     `alembic upgrade head` re-runs the first migration and dies on
+#     "duplicate column name: slug").
+#   * alembic_version points to a revision no longer in versions/
+#     ("Can't locate revision identified by '<rev>'").
+heal_alembic() {
+  local label="$1" python_bin="$2" ini="$3" cwd="$4"
+  if [ ! -x "${python_bin}" ] || [ ! -f "${ini}" ]; then
+    return 0
+  fi
+  log "Running Alembic self-heal for ${label}..."
+  set +e
+  "${python_bin}" "${ROOT_DIR}/scripts/_alembic_heal.py" --ini "${ini}" --cwd "${cwd}"
+  local rc=$?
+  set -e
+  case "${rc}" in
+    0) return 0 ;;
+    2)
+      err "Alembic self-heal for ${label} REFUSED to stamp head on Postgres "\
+"(schema drift suspected). Run 'make repair-db' to reconcile, then re-run 'make run'."
+      ;;
+    *)
+      warn "Alembic self-heal for ${label} reported a problem (rc=${rc}); continuing."
+      ;;
+  esac
+}
+
+# ---------------------------
 # Start MCP-Gateway (background, supervised)
 # ---------------------------
 GW_PID=""
@@ -148,6 +187,22 @@ start_gateway() {
   if [ ! -f "${GATEWAY_ENV_FILE}" ] && [ -f "${GATEWAY_ENV_LOCAL}" ]; then
     cp "${GATEWAY_ENV_LOCAL}" "${GATEWAY_ENV_FILE}"
     log "Created ${GATEWAY_ENV_FILE} from ${GATEWAY_ENV_LOCAL}"
+  fi
+
+  # Self-heal gateway alembic_version BEFORE bootstrap_db() runs at
+  # gunicorn-worker import time. The gateway alembic.ini lives at
+  # mcpgateway/alembic.ini in the upstream layout.
+  local gw_ini=""
+  if   [ -f "${GATEWAY_DIR}/alembic.ini" ]; then gw_ini="${GATEWAY_DIR}/alembic.ini"
+  elif [ -f "${GATEWAY_DIR}/mcpgateway/alembic.ini" ]; then gw_ini="${GATEWAY_DIR}/mcpgateway/alembic.ini"
+  fi
+  if [ -n "${gw_ini}" ]; then
+    # Run heal under the gateway's loaded env so DATABASE_URL is set.
+    (
+      cd "${GATEWAY_DIR}"
+      if [ -f ".env" ]; then set -a; . ".env"; set +a; fi
+      heal_alembic "gateway" "${GATEWAY_PYTHON}" "${gw_ini}" "$(dirname "${gw_ini}")"
+    )
   fi
 
   (
@@ -222,11 +277,32 @@ start_hub() {
     # Activate venv
     . "${HUB_VENV}/bin/activate"
 
+    # Self-heal Alembic version state (handles bogus version_num
+    # pointers and missing alembic_version) BEFORE upgrade head.
+    heal_alembic "hub" "${HUB_PYTHON}" "${ROOT_DIR}/alembic.ini" "${ROOT_DIR}"
+
     # Optional Alembic migrations (best-effort)
     if [ -x "${HUB_VENV}/bin/alembic" ] && [ -f "${ROOT_DIR}/alembic.ini" ]; then
       log "Running Alembic migrations..."
       if ! "${HUB_VENV}/bin/alembic" upgrade head; then
-        warn "Alembic migrations failed; continuing."
+        warn "First Alembic upgrade failed; re-running self-heal and retrying once."
+        heal_alembic "hub-retry" "${HUB_PYTHON}" "${ROOT_DIR}/alembic.ini" "${ROOT_DIR}"
+        if ! "${HUB_VENV}/bin/alembic" upgrade head; then
+          warn "Alembic migrations failed after self-heal; continuing."
+        fi
+      fi
+    fi
+
+    # Schema drift gate. After heal+upgrade, every required ORM column
+    # must be present. If not, refuse to start the Hub — better an
+    # explicit boot failure than 500 on every search request.
+    if [ -f "${ROOT_DIR}/scripts/check_schema_drift.py" ]; then
+      set +e
+      "${HUB_PYTHON}" "${ROOT_DIR}/scripts/check_schema_drift.py"
+      drift_rc=$?
+      set -e
+      if [ "${drift_rc}" -eq 2 ]; then
+        err "Schema drift detected; refusing to start Hub. Run 'make repair-db'."
       fi
     fi
 
