@@ -91,14 +91,20 @@ jobs:
       - name: 5) repair_db.py is a no-op on a healthy DB
         run: |
           python scripts/repair_db.py --dry-run | tee /tmp/dryrun.txt
-          # On a freshly-migrated DB the plan must be empty.
-          if grep -q "planned actions (0)" /tmp/dryrun.txt; then
-            echo "OK: repair_db.py reports no work on a healthy DB."
-          elif grep -q "nothing to do" /tmp/dryrun.txt; then
-            echo "OK: repair_db.py is a no-op."
+          # On a freshly-migrated DB repair_db must announce it has
+          # nothing to do. Any planned action means a migration left
+          # the schema not matching what repair_db expects, OR
+          # repair_db is over-eager — both are bugs we want CI to
+          # surface immediately.
+          if grep -qE "nothing to do|planned actions \(0\)" /tmp/dryrun.txt; then
+            echo "OK: repair_db.py is a no-op on the freshly-migrated DB."
           else
-            echo "FAIL: repair_db.py wants to change a healthy schema:"
-            cat /tmp/dryrun.txt
+            echo "FAIL: repair_db.py wants to change a freshly-migrated schema."
+            echo "      This means either:"
+            echo "        a) a migration didn't apply something repair_db expects"
+            echo "           (compare the planned actions vs the migrations chain), or"
+            echo "        b) repair_db is detecting drift that isn't really there"
+            echo "           (gate the offending plan entry on actual schema state)."
             exit 1
           fi
 

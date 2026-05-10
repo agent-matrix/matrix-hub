@@ -149,8 +149,15 @@ def main() -> int:
             return 0
 
         existing_cols = {c["name"] for c in insp.get_columns("entity")}
-        # 1. pg_trgm
-        plan.append(("extension", "CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
+
+        # 1. pg_trgm extension — only plan if it's actually missing, so
+        # `repair_db.py --dry-run` is a true no-op on a healthy DB
+        # (CI relies on this to gate "no drift" on a freshly-migrated DB).
+        has_pg_trgm = bool(conn.execute(text(
+            "SELECT 1 FROM pg_extension WHERE extname = 'pg_trgm'"
+        )).fetchone())
+        if not has_pg_trgm:
+            plan.append(("extension", "CREATE EXTENSION IF NOT EXISTS pg_trgm;"))
 
         # 2. entity columns
         for col, ddl in ENTITY_COLUMNS_DDL.items():
