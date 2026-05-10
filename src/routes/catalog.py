@@ -32,14 +32,17 @@ from ..utils.tools import install_inline_manifest  # inline install shortcut (sk
 # Search plumbing (interfaces + backends)
 from ..services.search import ranker, util  # type: ignore
 from ..services import install  # Standard DB-backed install
-# Import search backends directly from the factory singletons
+# Vector singleton + helpers (lexical is dispatched via engine.run_keyword instead).
 from ..services.search import (  # type: ignore
-    lexical_backend as lexical,
     vector_backend as vector,
     embedder,
     blobstore,
 )
-# Engine wrapper (adds dev/SQLite fallback when SEARCH_LEXICAL_BACKEND=none)
+# Engine wrapper: dispatches keyword search to pg_trgm OR LIKE based on the
+# SEARCH_LEXICAL_BACKEND setting. Using this avoids the buggy `lexical_backend`
+# singleton, which silently fell through to NullLexicalBackend when configured
+# for `pgtrgm` because src/services/search/backends/pgtrgm.py only exports a
+# module-level `search()` function (no `PGTrgmBackend` class).
 from ..services.search import engine
 
 # Optional RAG and reranker (guarded)
@@ -157,12 +160,19 @@ def search_catalog(
     except HTTPException:
         raise
     except Exception as exc:  # pragma: no cover - defensive
-        log.exception("catalog.search failed", extra={"rid": rid, "q": q, "mode": getattr(mode, "value", str(mode))})
+        log.exception(
+            "catalog.search failed",
+            extra={"rid": rid, "q": q, "mode": getattr(mode, "value", str(mode))},
+        )
+        # IMPORTANT: do NOT use type(exc) here — the route's `type` query
+        # parameter shadows the builtin in this scope, which used to raise
+        # `TypeError: 'NoneType' object is not callable` from inside the
+        # exception handler itself, masking the real error.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={
                 "error": "SearchFailed",
-                "reason": type(exc).__name__ + ": " + str(exc),
+                "reason": exc.__class__.__name__ + ": " + str(exc),
             },
         ) from exc
 
@@ -201,39 +211,23 @@ def _search_catalog_impl(
         "limit": max(limit, POOL_K),
     }
 
-    # Lexical (BM25/pg_trgm) unless semantic-only
+    # Lexical (BM25/pg_trgm) unless semantic-only.
+    # Always dispatch through engine.run_keyword(): it picks pg_trgm OR LIKE
+    # based on SEARCH_LEXICAL_BACKEND, and — unlike the legacy
+    # `lexical.search()` singleton path — it does not silently fall through
+    # to NullLexicalBackend when the configured backend module fails to
+    # expose a class (the pgtrgm backend only exports a module-level
+    # `search()` function).
     lex_hits: List[Dict[str, Any]] = []
     if mode != schemas.SearchMode.semantic:
-        if getattr(settings, "SEARCH_LEXICAL_BACKEND", "none").lower() == "none":
-            # Dev/SQLite path: engine wrapper falls back to LIKE search and respects include_pending
-            lex_hits = engine.run_keyword(
-                db=db,
-                q=q,
-                types=([filters["type"]] if filters["type"] else None),
-                include_pending=include_pending,
-                limit=max(limit, POOL_K),
-                offset=0,
-            )
-        else:
-            # Existing prod path (pg_trgm or other configured backend)
-            lex_kwargs = dict(base_filters)
-            # Forward the dev switch for backends that support it (prod-safe default False)
-            lex_kwargs["include_pending"] = include_pending
-            # Avoid passing db to Null backends (defensive getattr)
-            if "Null" not in getattr(getattr(lexical, "__class__", object), "__name__", ""):
-                lex_kwargs["db"] = db
-            try:
-                lex_hits = lexical.search(q, **lex_kwargs)
-            except TypeError as exc:
-                # The configured backend doesn't accept one of our keyword
-                # args (e.g. NullLexicalBackend doesn't accept
-                # `include_pending`). Drop the unknown kwargs and retry
-                # rather than 500'ing the whole request.
-                log.warning("lexical backend %s rejected kwargs (%s); retrying without them",
-                            getattr(getattr(lexical, "__class__", object), "__name__", "?"), exc)
-                for k in ("include_pending", "db"):
-                    lex_kwargs.pop(k, None)
-                lex_hits = lexical.search(q, **lex_kwargs)
+        lex_hits = engine.run_keyword(
+            db=db,
+            q=q,
+            types=([filters["type"]] if filters["type"] else None),
+            include_pending=include_pending,
+            limit=max(limit, POOL_K),
+            offset=0,
+        )
 
     # Vector (ANN) unless keyword-only — restore v0.1.4 behavior
     vec_hits: List[Dict[str, Any]] = []

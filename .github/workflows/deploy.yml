@@ -11,6 +11,10 @@ on:
         description: "Docker image tag to deploy. Default: latest"
         required: false
         default: "latest"
+      lexical_backend:
+        description: "SEARCH_LEXICAL_BACKEND (none | pgtrgm). Overrides the repo variable for one run."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -26,19 +30,21 @@ env:
   GATEWAY_PORT: 4444
   PUBLIC_HEALTH_URL: https://api.matrixhub.io/health?check_db=true
   TLS_HOST_DIR: /etc/ssl/matrixhub
-  # uid/gid the container runs as (USER app in the Dockerfile). The
-  # `matrixhub_data` Docker volume must be writable by this uid; we
-  # enforce it on every deploy so a stale volume from an older image
-  # build can't break gunicorn workers with PermissionError on
-  # /app/data/blobs.
   CONTAINER_UID: "999"
   CONTAINER_GID: "999"
-  # Resource caps for a 1 GB OCI E2.1.Micro instance.
-  # Leave ~100 MB headroom for sshd / systemd / kernel.
   CONTAINER_MEMORY: 900m
   CONTAINER_CPUS: "0.9"
-  # Keep this many .env.bak.<ts> files on the VM; older ones are deleted.
   ENV_BACKUPS_TO_KEEP: 10
+  # Search backend the deploy writes into the VM's .env on every run.
+  # Resolution order:
+  #   1. workflow_dispatch input `lexical_backend` (one-shot override)
+  #   2. repo variable `SEARCH_LEXICAL_BACKEND`
+  #   3. literal default `none`
+  # We write BOTH `SEARCH_LEXICAL_BACKEND` and `SEARCH_BACKEND__LEXICAL`
+  # to the same value because src/config.py prefers `SEARCH_BACKEND__LEXICAL`
+  # (Pydantic AliasChoices) — setting only one would silently keep the other
+  # at its previous value.
+  SEARCH_LEXICAL_BACKEND: ${{ github.event.inputs.lexical_backend || vars.SEARCH_LEXICAL_BACKEND || 'none' }}
 
 jobs:
   deploy:
@@ -110,6 +116,8 @@ jobs:
                 ;;
             esac
           fi
+
+          echo "::notice::SEARCH_LEXICAL_BACKEND will be written to the VM .env as: ${{ env.SEARCH_LEXICAL_BACKEND }}"
 
       - name: Determine image tag
         id: tag
@@ -197,7 +205,6 @@ jobs:
 
           if [ -z "${CF_ORIGIN_CERT:-}" ] || [ -z "${CF_ORIGIN_KEY:-}" ]; then
             echo "CF_ORIGIN_CERT / CF_ORIGIN_KEY not provided — skipping install."
-            echo "The next step will verify ${TLS_HOST_DIR}/cf-origin.{pem,key} are already present on the VM."
             exit 0
           fi
 
@@ -210,9 +217,8 @@ jobs:
             echo "::error::CF_ORIGIN_CERT is not a parseable X.509 PEM."
             exit 1
           fi
-
           if ! openssl pkey -in "$tmp/cf-origin.key" -noout >/dev/null 2>&1; then
-            echo "::error::CF_ORIGIN_KEY is not a parseable PEM private key (or it is passphrase-protected)."
+            echo "::error::CF_ORIGIN_KEY is not a parseable PEM private key."
             exit 1
           fi
 
@@ -221,28 +227,13 @@ jobs:
                        | openssl dgst -sha256 -hex | awk '{print $NF}')"
           key_hash="$(openssl pkey  -in "$tmp/cf-origin.key" -pubout -outform DER 2>/dev/null \
                        | openssl dgst -sha256 -hex | awk '{print $NF}')"
-          if [ -z "$cert_hash" ] || [ -z "$key_hash" ] || [ "$cert_hash" != "$key_hash" ]; then
-            echo "::error::CF_ORIGIN_CERT and CF_ORIGIN_KEY do NOT match (public-key SPKI mismatch)."
-            echo "  cert pubkey sha256: $cert_hash"
-            echo "  key  pubkey sha256: $key_hash"
+          if [ "$cert_hash" != "$key_hash" ]; then
+            echo "::error::CF_ORIGIN_CERT and CF_ORIGIN_KEY do NOT match (SPKI mismatch)."
             exit 1
           fi
 
-          echo "Cert/key pair validated locally:"
-          openssl x509 -in "$tmp/cf-origin.pem" -noout -subject -issuer -dates -fingerprint -sha256 \
-            | sed 's/^/  /'
-          if openssl x509 -in "$tmp/cf-origin.pem" -noout -checkend 604800 >/dev/null 2>&1; then
-            echo "  expires:    in more than 7 days (OK)"
-          else
-            echo "::warning::Cert expires within 7 days (or already has). Renew via Cloudflare → SSL/TLS → Origin Server."
-          fi
-
-          echo "Shipping cert + key to ${TLS_HOST_DIR} on the VM..."
-          scp -i ~/.ssh/oci_key \
-              -o StrictHostKeyChecking=yes \
-              -o IdentitiesOnly=yes \
-              "$tmp/cf-origin.pem" "$tmp/cf-origin.key" \
-              oci-prod:/tmp/
+          scp -i ~/.ssh/oci_key -o StrictHostKeyChecking=yes -o IdentitiesOnly=yes \
+              "$tmp/cf-origin.pem" "$tmp/cf-origin.key" oci-prod:/tmp/
 
           ssh oci-prod TLS_HOST_DIR="${TLS_HOST_DIR}" bash -s <<'REMOTE'
           set -euo pipefail
@@ -251,12 +242,7 @@ jobs:
           sudo install -m 0644 -o root -g root /tmp/cf-origin.pem "$DEST/cf-origin.pem"
           sudo install -m 0644 -o root -g root /tmp/cf-origin.key "$DEST/cf-origin.key"
           rm -f /tmp/cf-origin.pem /tmp/cf-origin.key
-          echo "Installed:"
           sudo ls -l "$DEST/cf-origin.pem" "$DEST/cf-origin.key"
-          if command -v openssl >/dev/null; then
-            sudo openssl x509 -in "$DEST/cf-origin.pem" -noout -subject -issuer -dates -fingerprint -sha256 \
-              | sed 's/^/  /'
-          fi
           REMOTE
 
       - name: Deploy via SSH
@@ -270,6 +256,7 @@ jobs:
           CONTAINER_GID: ${{ env.CONTAINER_GID }}
           ENV_BACKUPS_TO_KEEP: ${{ env.ENV_BACKUPS_TO_KEEP }}
           AIVEN_DATABASE_URL: ${{ secrets.AIVEN_DATABASE_URL }}
+          SEARCH_LEXICAL_BACKEND: ${{ env.SEARCH_LEXICAL_BACKEND }}
         run: |
           set -euo pipefail
 
@@ -282,6 +269,7 @@ jobs:
               CONTAINER_GID="${CONTAINER_GID}" \
               ENV_BACKUPS_TO_KEEP="${ENV_BACKUPS_TO_KEEP}" \
               AIVEN_DATABASE_URL="${AIVEN_DATABASE_URL}" \
+              SEARCH_LEXICAL_BACKEND="${SEARCH_LEXICAL_BACKEND}" \
               bash -s <<'DEPLOY_SCRIPT'
           set -euo pipefail
 
@@ -295,10 +283,10 @@ jobs:
           UID_INSIDE="${CONTAINER_UID:-999}"
           GID_INSIDE="${CONTAINER_GID:-999}"
           KEEP_BACKUPS="${ENV_BACKUPS_TO_KEEP:-10}"
+          LEXICAL_BACKEND="${SEARCH_LEXICAL_BACKEND:-none}"
 
           echo "=== Host info ==="
           whoami; hostname; uptime
-          echo "Free memory:"
           free -h | sed 's/^/  /'
 
           echo "=== Detecting env file ==="
@@ -308,16 +296,9 @@ jobs:
             "/home/ubuntu/matrix-hub/.env" \
             "/home/opc/matrix-hub/.env"
           do
-            if [ -f "$candidate" ]; then
-              ENV_FILE="$candidate"
-              break
-            fi
+            if [ -f "$candidate" ]; then ENV_FILE="$candidate"; break; fi
           done
-
-          if [ -z "$ENV_FILE" ] || [ ! -f "$ENV_FILE" ]; then
-            echo "ERROR: no .env file found." >&2
-            exit 1
-          fi
+          [ -n "$ENV_FILE" ] || { echo "ERROR: no .env file found." >&2; exit 1; }
           echo "=== Using env file: $ENV_FILE ==="
 
           echo "=== Checking Cloudflare Origin Cert at ${TLS_DIR} ==="
@@ -327,9 +308,7 @@ jobs:
             echo "::error::Missing TLS material at ${TLS_DIR}/cf-origin.{pem,key}."
             exit 1
           fi
-          echo "TLS material present:"
-          sudo ls -l "${TLS_DIR}/cf-origin.pem" "${TLS_DIR}/cf-origin.key" \
-            | sed 's/^/  /'
+          sudo ls -l "${TLS_DIR}/cf-origin.pem" "${TLS_DIR}/cf-origin.key" | sed 's/^/  /'
 
           echo "=== Backing up .env (keeping last ${KEEP_BACKUPS}) ==="
           ENV_DIR="$(dirname "$ENV_FILE")"
@@ -344,73 +323,65 @@ jobs:
             case "$AIVEN_DATABASE_URL" in
               postgresql+*) ;;
               postgres://*)
-                echo "Auto-converting libpq scheme 'postgres://' → 'postgresql+psycopg://'."
-                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgres://}"
-                ;;
+                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgres://}";;
               postgresql://*)
-                echo "Auto-converting libpq scheme 'postgresql://' → 'postgresql+psycopg://'."
-                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgresql://}"
-                ;;
+                AIVEN_DATABASE_URL="postgresql+psycopg://${AIVEN_DATABASE_URL#postgresql://}";;
             esac
-
             for key in DATABASE_URL DATABASE_URL_PRIMARY SQLALCHEMY_DATABASE_URI DB_URL; do
               if grep -qE "^${key}=" "$ENV_FILE"; then
                 sed -i "s|^${key}=.*|${key}=${AIVEN_DATABASE_URL}|" "$ENV_FILE"
               fi
             done
             grep -q '^DATABASE_URL=' "$ENV_FILE" || echo "DATABASE_URL=${AIVEN_DATABASE_URL}" >> "$ENV_FILE"
-            echo "DATABASE_URL is now Aiven (password masked):"
-            grep -E '^(DATABASE_URL|DATABASE_URL_PRIMARY|SQLALCHEMY_DATABASE_URI|DB_URL)=' "$ENV_FILE" \
-              | sed -E 's#(://[^:]+:)[^@]+(@)#\1***\2#' \
-              | sed 's/^/  /'
           else
             echo "::warning::AIVEN_DATABASE_URL secret not provided; keeping DATABASE_URL from .env"
           fi
 
           echo "=== Normalizing .env values for Docker --env-file ==="
+          # Lexical backend is now CONFIGURABLE via SEARCH_LEXICAL_BACKEND
+          # (passed in from the workflow). Both names are written because
+          # src/config.py prefers SEARCH_BACKEND__LEXICAL via Pydantic
+          # AliasChoices — setting only one would silently lose to the other.
+          case "$LEXICAL_BACKEND" in
+            none|pgtrgm|opensearch) : ;;
+            *)
+              echo "::warning::Unknown SEARCH_LEXICAL_BACKEND='${LEXICAL_BACKEND}', falling back to 'none'."
+              LEXICAL_BACKEND="none"
+              ;;
+          esac
+          echo "  Effective SEARCH_LEXICAL_BACKEND = ${LEXICAL_BACKEND}"
+
           sed -i \
-            -e 's/^SEARCH_LEXICAL_BACKEND=.*/SEARCH_LEXICAL_BACKEND=none/' \
-            -e 's/^SEARCH_VECTOR_BACKEND=.*/SEARCH_VECTOR_BACKEND=none/' \
-            -e 's/^SEARCH_BACKEND__LEXICAL=.*/SEARCH_BACKEND__LEXICAL=none/' \
-            -e 's/^SEARCH_BACKEND__VECTOR=.*/SEARCH_BACKEND__VECTOR=none/' \
-            -e 's/^SEARCH_DEFAULT_MODE=.*/SEARCH_DEFAULT_MODE=keyword/' \
-            -e 's/^RERANK_DEFAULT=.*/RERANK_DEFAULT=none/' \
+            -e "s|^SEARCH_LEXICAL_BACKEND=.*|SEARCH_LEXICAL_BACKEND=${LEXICAL_BACKEND}|" \
+            -e "s|^SEARCH_BACKEND__LEXICAL=.*|SEARCH_BACKEND__LEXICAL=${LEXICAL_BACKEND}|" \
+            -e 's|^SEARCH_VECTOR_BACKEND=.*|SEARCH_VECTOR_BACKEND=none|' \
+            -e 's|^SEARCH_BACKEND__VECTOR=.*|SEARCH_BACKEND__VECTOR=none|' \
+            -e 's|^SEARCH_DEFAULT_MODE=.*|SEARCH_DEFAULT_MODE=keyword|' \
+            -e 's|^RERANK_DEFAULT=.*|RERANK_DEFAULT=none|' \
             "$ENV_FILE"
 
-          grep -q '^SEARCH_LEXICAL_BACKEND=' "$ENV_FILE" || echo 'SEARCH_LEXICAL_BACKEND=none' >> "$ENV_FILE"
-          grep -q '^SEARCH_VECTOR_BACKEND=' "$ENV_FILE" || echo 'SEARCH_VECTOR_BACKEND=none' >> "$ENV_FILE"
-          grep -q '^SEARCH_BACKEND__LEXICAL=' "$ENV_FILE" || echo 'SEARCH_BACKEND__LEXICAL=none' >> "$ENV_FILE"
-          grep -q '^SEARCH_BACKEND__VECTOR=' "$ENV_FILE" || echo 'SEARCH_BACKEND__VECTOR=none' >> "$ENV_FILE"
-          grep -q '^SEARCH_DEFAULT_MODE=' "$ENV_FILE" || echo 'SEARCH_DEFAULT_MODE=keyword' >> "$ENV_FILE"
-          grep -q '^RERANK_DEFAULT=' "$ENV_FILE" || echo 'RERANK_DEFAULT=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_LEXICAL_BACKEND='  "$ENV_FILE" || echo "SEARCH_LEXICAL_BACKEND=${LEXICAL_BACKEND}"  >> "$ENV_FILE"
+          grep -q '^SEARCH_BACKEND__LEXICAL=' "$ENV_FILE" || echo "SEARCH_BACKEND__LEXICAL=${LEXICAL_BACKEND}" >> "$ENV_FILE"
+          grep -q '^SEARCH_VECTOR_BACKEND='   "$ENV_FILE" || echo 'SEARCH_VECTOR_BACKEND=none'  >> "$ENV_FILE"
+          grep -q '^SEARCH_BACKEND__VECTOR='  "$ENV_FILE" || echo 'SEARCH_BACKEND__VECTOR=none' >> "$ENV_FILE"
+          grep -q '^SEARCH_DEFAULT_MODE='     "$ENV_FILE" || echo 'SEARCH_DEFAULT_MODE=keyword' >> "$ENV_FILE"
+          grep -q '^RERANK_DEFAULT='          "$ENV_FILE" || echo 'RERANK_DEFAULT=none'         >> "$ENV_FILE"
 
           python3 - "$ENV_FILE" <<'PY'
-          import pathlib
-          import re
-          import sys
-
+          import pathlib, re, sys
           path = pathlib.Path(sys.argv[1])
-          lines = path.read_text().splitlines()
-          cleaned = []
-
-          for line in lines:
-              stripped = line.lstrip()
-
-              if not line or stripped.startswith("#") or "=" not in line:
-                  cleaned.append(line)
-                  continue
-
+          out = []
+          for line in path.read_text().splitlines():
+              s = line.lstrip()
+              if not line or s.startswith("#") or "=" not in line:
+                  out.append(line); continue
               key, sep, value = line.partition("=")
-              value_lstrip = value.lstrip()
-
-              if value_lstrip.startswith(('"', "'", "[", "{")):
-                  cleaned.append(line)
-                  continue
-
+              v = value.lstrip()
+              if v.startswith(('"', "'", "[", "{")):
+                  out.append(line); continue
               value = re.sub(r"\s+#.*$", "", value).rstrip()
-              cleaned.append(f"{key}{sep}{value}")
-
-          path.write_text("\n".join(cleaned) + "\n")
+              out.append(f"{key}{sep}{value}")
+          path.write_text("\n".join(out) + "\n")
           PY
 
           echo "Effective search config:"
@@ -422,28 +393,19 @@ jobs:
           echo "=== Stopping canonical and legacy containers ==="
           for name in "$CONTAINER" "${LEGACY_NAMES[@]}"; do
             if docker ps -a --format '{{.Names}}' | grep -qx "$name"; then
-              echo "Stopping/removing $name"
               docker stop "$name" >/dev/null 2>&1 || true
               docker rm   "$name" >/dev/null 2>&1 || true
             fi
           done
-
-          echo "=== Stopping containers holding :443 or :4444 ==="
           mapfile -t holders < <(
             docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' \
               | awk '/(:|->)443\/tcp|->4444\/tcp/ {print $1, $2}'
           )
-          if [ "${#holders[@]}" -gt 0 ]; then
-            for line in "${holders[@]}"; do
-              id="${line%% *}"
-              name="${line#* }"
-              echo "Stopping/removing $name ($id)"
-              docker stop "$id" >/dev/null 2>&1 || true
-              docker rm   "$id" >/dev/null 2>&1 || true
-            done
-          else
-            echo "No running Docker container is holding :443 or :4444."
-          fi
+          for line in "${holders[@]}"; do
+            id="${line%% *}"; name="${line#* }"
+            docker stop "$id" >/dev/null 2>&1 || true
+            docker rm   "$id" >/dev/null 2>&1 || true
+          done
 
           echo "=== Initializing matrixhub_data volume ownership (uid=${UID_INSIDE} gid=${GID_INSIDE}) ==="
           docker volume create matrixhub_data >/dev/null
@@ -454,54 +416,33 @@ jobs:
               mkdir -p /app/data/blobs
               chown -R ${UID_INSIDE}:${GID_INSIDE} /app/data
               chmod -R u+rwX,g+rwX /app/data
-              ls -la /app/data | sed 's/^/  /'
             "
 
           echo "=== Installing runtime TLS supervisor override ==="
-          # The published Docker image still ships the OLD supervisord.conf
-          # (Hub on cleartext :443) and an HTTP-based HEALTHCHECK. Until a
-          # fresh image with our baked-in fixes is published, mount these
-          # three files on top of the image to match the manual VM recipe
-          # known to work end-to-end (TLS terminated by gunicorn, gateway
-          # pinned to :4444, no port collision).
           cat > /home/ubuntu/start-hub-tls.sh <<'EOF_HUB'
           #!/usr/bin/env bash
           set -euo pipefail
-
           CERT="/etc/ssl/matrixhub/cf-origin.pem"
           KEY="/etc/ssl/matrixhub/cf-origin.key"
-
           if [ ! -s "$CERT" ] || [ ! -s "$KEY" ]; then
             echo "[hub] ERROR: missing TLS cert/key at /etc/ssl/matrixhub"
             exit 1
           fi
-
           echo "[hub] TLS enabled on :443"
-
           exec /app/.venv/bin/gunicorn src.app:app \
             -k uvicorn.workers.UvicornWorker \
-            --bind 0.0.0.0:443 \
-            --certfile "$CERT" \
-            --keyfile "$KEY"
+            --bind 0.0.0.0:443 --certfile "$CERT" --keyfile "$KEY"
           EOF_HUB
 
           cat > /home/ubuntu/start-gateway-4444.sh <<'EOF_GW'
           #!/usr/bin/env bash
           set -euo pipefail
-
           cd /app/mcpgateway
           . .venv/bin/activate
-
-          set -a
-          [ -f .env ] && . ./.env
-          set +a
-
+          set -a; [ -f .env ] && . ./.env; set +a
           python -m mcpgateway.db
-
           unset HOST PORT
-
           echo "[gateway] starting on :4444"
-
           exec mcpgateway --host 0.0.0.0 --port 4444
           EOF_GW
 
@@ -509,7 +450,6 @@ jobs:
           [supervisord]
           nodaemon=true
           user=app
-
           [program:hub]
           command=/app/start-hub-tls.sh
           directory=/app
@@ -520,7 +460,6 @@ jobs:
           stdout_logfile_maxbytes=0
           stderr_logfile=/dev/stderr
           stderr_logfile_maxbytes=0
-
           [program:gateway]
           command=/app/start-gateway-4444.sh
           directory=/app/mcpgateway
@@ -534,16 +473,8 @@ jobs:
           EOF_SUP
 
           chmod +x /home/ubuntu/start-hub-tls.sh /home/ubuntu/start-gateway-4444.sh
-          ls -la \
-            /home/ubuntu/start-hub-tls.sh \
-            /home/ubuntu/start-gateway-4444.sh \
-            /home/ubuntu/supervisord.matrixhub.tls.conf \
-            | sed 's/^/  /'
 
           echo "=== Starting ${CONTAINER} (memory=${MEM}, cpus=${CPUS}) ==="
-          # --no-healthcheck disables the image's HTTP-based HEALTHCHECK,
-          # which is wrong for the TLS-on-:443 setup we use in production.
-          # We probe HTTPS /health from the workflow below instead.
           docker run -d \
             --name "${CONTAINER}" \
             --restart unless-stopped \
@@ -553,9 +484,7 @@ jobs:
             --memory "${MEM}" \
             --memory-swap "${MEM}" \
             --cpus "${CPUS}" \
-            --log-driver json-file \
-            --log-opt max-size=10m \
-            --log-opt max-file=3 \
+            --log-driver json-file --log-opt max-size=10m --log-opt max-file=3 \
             --env-file "${ENV_FILE}" \
             -v matrixhub_data:/app/data \
             -v "${TLS_DIR}:/etc/ssl/matrixhub:ro" \
@@ -565,66 +494,38 @@ jobs:
             "${IMAGE}:${TAG}"
 
           echo "=== Waiting for HTTPS /health ==="
-          # We bypassed the image HEALTHCHECK with --no-healthcheck (it's
-          # HTTP-based and wrong for our TLS setup), so probe HTTPS /health
-          # directly. -k tolerates the Cloudflare Origin CA which isn't in
-          # the system trust store.
           RETRIES=0
-          MAX_RETRIES=60   # ~3 minutes total
-
-          until curl -kfsS --max-time 5 \
-                "https://127.0.0.1:443/health?check_db=true" \
-                >/tmp/matrixhub-health.json 2>/tmp/matrixhub-health.err; do
+          MAX_RETRIES=60
+          until curl -kfsS --max-time 5 "https://127.0.0.1:443/health?check_db=true" \
+                  >/tmp/matrixhub-health.json 2>/tmp/matrixhub-health.err; do
             RETRIES=$((RETRIES + 1))
-
             if [ "$RETRIES" -ge "$MAX_RETRIES" ]; then
               echo "::error::HTTPS health check failed after ${MAX_RETRIES} attempts."
-              echo "--- curl stderr ---"
               cat /tmp/matrixhub-health.err || true
-              echo "--- docker ps ---"
-              docker ps -a || true
-              echo "--- last 250 container logs ---"
               docker logs --tail 250 "${CONTAINER}" || true
               exit 1
             fi
-
-            echo "Waiting... (${RETRIES}/${MAX_RETRIES})"
             sleep 3
           done
-
           echo "Local HTTPS /health OK:"
-          cat /tmp/matrixhub-health.json
-          echo
+          cat /tmp/matrixhub-health.json; echo
 
           echo "=== TLS check on :443 ==="
-          # Plain handshake check — no -CAfile, since the Cloudflare Origin
-          # Root CA isn't always reachable from the VM and we already proved
-          # /health works above. We just want to confirm the server is
-          # speaking TLS, not plaintext.
-          if echo | timeout 8 openssl s_client \
-                 -connect 127.0.0.1:443 \
-                 -servername api.matrixhub.io \
-                 2>/tmp/matrixhub_tls_check.err \
-               | tee /tmp/matrixhub_tls_check.out \
-               | grep -qE '^subject='; then
+          if echo | timeout 8 openssl s_client -connect 127.0.0.1:443 -servername api.matrixhub.io \
+               2>/tmp/matrixhub_tls_check.err \
+             | tee /tmp/matrixhub_tls_check.out \
+             | grep -qE '^subject='; then
             echo "TLS handshake on :443 OK"
             grep -E '^(subject|issuer)=' /tmp/matrixhub_tls_check.out | sed 's/^/  /'
           else
             echo "::error::Container is not negotiating TLS on :443."
-            echo "--- openssl stderr ---"
             cat /tmp/matrixhub_tls_check.err || true
-            echo "--- last 160 lines of container log ---"
             docker logs --tail 160 "${CONTAINER}" || true
             exit 1
           fi
 
-          echo "=== Resource usage after start ==="
-          docker stats --no-stream "${CONTAINER}" 2>/dev/null \
-            | sed 's/^/  /' || true
-
-          echo "=== Cleaning old Docker images ==="
+          docker stats --no-stream "${CONTAINER}" 2>/dev/null | sed 's/^/  /' || true
           docker image prune -f || true
-
           echo "=== Deploy complete ==="
           DEPLOY_SCRIPT
 
@@ -632,23 +533,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Verifying external access to ${PUBLIC_HEALTH_URL}"
           sleep 5
-
           STATUS="$(curl -sS -o /tmp/health.json -w '%{http_code}' --max-time 20 "${PUBLIC_HEALTH_URL}" || echo 000)"
-
           echo "HTTP ${STATUS}"
-
-          if [ -s /tmp/health.json ]; then
-            head -c 1000 /tmp/health.json
-            echo
-          fi
-
+          if [ -s /tmp/health.json ]; then head -c 1000 /tmp/health.json; echo; fi
           if [ "$STATUS" = "525" ]; then
             echo "::error::HTTP 525 — Cloudflare cannot complete TLS handshake to the origin."
-            echo "Confirm the Cloudflare Origin Cert is at ${TLS_HOST_DIR}/cf-origin.{pem,key}"
-            echo "and that the matrix-hub container started with that path mounted."
             exit 1
           elif [ "$STATUS" != "200" ]; then
             echo "::error::External health check returned HTTP ${STATUS}."
@@ -660,23 +550,15 @@ jobs:
         shell: bash
         run: |
           {
-            echo "## OCI deployment"
-            echo
+            echo "## OCI deployment"; echo
             echo "- Image: \`${{ env.DOCKER_IMAGE }}:${{ steps.tag.outputs.TAG || 'latest' }}\`"
-            echo "- Host: \`${{ secrets.OCI_HOST }}\`"
-            echo "- User: \`${{ secrets.OCI_USER }}\`"
-            echo "- Container: \`${{ env.CONTAINER_NAME }}\` (memory=${{ env.CONTAINER_MEMORY }}, cpus=${{ env.CONTAINER_CPUS }}, runs as uid=${{ env.CONTAINER_UID }})"
-            echo "- TLS dir on host: \`${{ env.TLS_HOST_DIR }}\` (mounted ro into the container)"
-            echo "- TLS supervisor override: \`/home/ubuntu/supervisord.matrixhub.tls.conf\` + \`start-hub-tls.sh\` + \`start-gateway-4444.sh\` (mounted ro until a fresh image bakes them in)"
-            if [ -n "${{ secrets.CF_ORIGIN_CERT }}" ] && [ -n "${{ secrets.CF_ORIGIN_KEY }}" ]; then
-              echo "- TLS material managed by workflow (CF_ORIGIN_CERT / CF_ORIGIN_KEY secrets)"
-            else
-              echo "- TLS material managed manually on the VM (no CF_ORIGIN_* secrets set)"
-            fi
+            echo "- Host: \`${{ secrets.OCI_HOST }}\`  User: \`${{ secrets.OCI_USER }}\`"
+            echo "- Container: \`${{ env.CONTAINER_NAME }}\` (memory=${{ env.CONTAINER_MEMORY }}, cpus=${{ env.CONTAINER_CPUS }}, uid=${{ env.CONTAINER_UID }})"
+            echo "- TLS dir: \`${{ env.TLS_HOST_DIR }}\`"
+            echo "- TLS supervisor override mounted from \`/home/ubuntu/*\`"
+            echo "- SEARCH_LEXICAL_BACKEND: \`${{ env.SEARCH_LEXICAL_BACKEND }}\`"
             if [ -n "${{ secrets.AIVEN_DATABASE_URL }}" ]; then
               echo "- DATABASE_URL pinned to Aiven by AIVEN_DATABASE_URL secret"
-            else
-              echo "- DATABASE_URL left as-is in the VM's .env (no AIVEN_DATABASE_URL secret set)"
             fi
             echo "- Health URL: \`${{ env.PUBLIC_HEALTH_URL }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -686,11 +568,8 @@ jobs:
         shell: bash
         run: |
           echo "::error::Deployment to OCI failed."
-          echo
           echo "Manual recovery on the Hub VM:"
-          echo "  cd ~/matrix-hub"
-          echo "  docker stop matrix-hub 2>/dev/null || true"
-          echo "  docker rm matrix-hub 2>/dev/null || true"
+          echo "  cd ~/matrix-hub && docker stop matrix-hub 2>/dev/null || true && docker rm matrix-hub 2>/dev/null || true"
           echo "  docker volume create matrixhub_data >/dev/null"
           echo "  docker run --rm -v matrixhub_data:/app/data alpine:3.20 sh -lc 'mkdir -p /app/data/blobs && chown -R ${{ env.CONTAINER_UID }}:${{ env.CONTAINER_GID }} /app/data && chmod -R u+rwX,g+rwX /app/data'"
           echo "  Re-run this GitHub Actions workflow after fixing the issues called out in the logs above."

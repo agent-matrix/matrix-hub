@@ -1,13 +1,24 @@
+# Dockerfile.prod — kept for backwards compatibility with
+# `scripts/build_container_prod.sh`. Functionally identical to the
+# canonical `Dockerfile`. The CI publish pipeline (`.github/workflows/
+# dockerhub.yml`) builds `Dockerfile`, not this one.
+#
+# If you find yourself diverging this file from Dockerfile, please
+# instead consider deleting Dockerfile.prod outright and pointing
+# scripts/build_container_prod.sh at Dockerfile (the build-time
+# arguments are identical).
+
 # Stage 1: Build the virtual environments
 FROM python:3.11-slim AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 # Build toolchain & git (for cloning gateway)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential gcc g++ libpq-dev git \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -17,27 +28,36 @@ COPY src/ ./src/
 COPY alembic.ini ./
 COPY alembic/ ./alembic/
 
-# Create Hub venv and install (include psycopg for Postgres)
+# Create Hub venv and install (include psycopg for Postgres + http2 httpx
+# for the catalog fetcher).
 RUN python -m venv /app/.venv && \
-    /app/.venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/.venv/bin/pip install --no-cache-dir \
+    /app/.venv/bin/pip install --upgrade pip setuptools wheel && \
+    /app/.venv/bin/pip install \
       . \
       'uvicorn[standard]' \
       gunicorn \
       alembic \
-      'psycopg[binary]'
+      'psycopg[binary]' \
+      'httpx[http2]'
 
 # --- Gateway Setup ---
-# Clone the gateway repository into /app/mcpgateway
-RUN git clone --depth 1 https://github.com/IBM/mcp-context-forge.git /app/mcpgateway
+# Allow pinning a specific ref/tag/branch at build time:
+#   --build-arg GATEWAY_REF=<ref>
+ARG GATEWAY_REF=main
+RUN git clone --depth 1 --branch "${GATEWAY_REF}" https://github.com/IBM/mcp-context-forge.git /app/mcpgateway
 
-# Create Gateway venv and install
+# Create Gateway venv and install (+ psycopg so the gateway can target
+# the same Postgres the Hub uses).
 RUN python -m venv /app/mcpgateway/.venv && \
-    /app/mcpgateway/.venv/bin/pip install --no-cache-dir --upgrade pip && \
-    /app/mcpgateway/.venv/bin/pip install --no-cache-dir \
+    /app/mcpgateway/.venv/bin/pip install --upgrade pip && \
+    /app/mcpgateway/.venv/bin/pip install \
       ./mcpgateway \
       'uvicorn[standard]' \
-      gunicorn
+      gunicorn \
+      'psycopg[binary]'
+
+# Guard: remove any stray SQLite DBs from the build context.
+RUN find /app -maxdepth 4 \( -name "*.db" -o -name "*.sqlite" -o -name "mcp.db" \) -print -delete || true
 
 
 # Stage 2: Runtime image
@@ -45,32 +65,60 @@ FROM python:3.11-slim AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
     PATH="/app/.venv/bin:/app/mcpgateway/.venv/bin:${PATH}" \
     INGEST_SCHED_ENABLED=false
 
-# Supervisor to optionally run multiple processes; curl for healthcheck
+# Supervisor for multi-process; curl for healthcheck;
+# postgresql-client so docker-entrypoint.sh + scripts/select_database_url.sh
+# can probe DATABASE_URL_PRIMARY/FALLBACK via psql at boot.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    supervisor curl \
-    && rm -rf /var/lib/apt/lists/*
+    supervisor curl postgresql-client \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Copy built artifacts and both virtualenvs
 COPY --from=builder /app /app
 
-# Supervisor config (expected to start hub + gateway when used)
+# Operational scripts the entrypoint relies on (selector, diagnosis, test_db).
+COPY scripts/ /app/scripts/
+RUN chmod +x /app/scripts/*.sh || true
+
+# Supervisor config (starts hub + gateway with TLS-aware Hub on :443
+# and gateway pinned to :4444).
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 
-# Security: non-root user
+# Guard again in the final image.
+RUN find /app -maxdepth 5 \( -name "*.db" -o -name "*.sqlite" -o -name "mcp.db" \) -print -delete || true
+
+# Tiny entrypoint that resolves DATABASE_URL_PRIMARY / DATABASE_URL_FALLBACK,
+# scrubs any leftover SQLite, then exec's supervisord.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Create the non-root `app` user, pre-create the runtime data dir, and
+# chown the entire app tree to it — all in one RUN so the chown can't run
+# before the user exists. Pre-creating /app/data/blobs is important: when
+# the deploy mounts an empty `matrixhub_data` named volume here, Docker
+# populates it from the image, preserving uid/gid, so gunicorn workers
+# never hit `PermissionError: '/app/data/blobs'` after a volume reset.
 RUN groupadd --system app && useradd --system -g app --home /app app && \
+    mkdir -p /app/data/blobs && \
     chown -R app:app /app
+
 USER app
 
 EXPOSE 443 4444
 
-# Healthcheck for Hub
-HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:443/" >/dev/null || exit 1
+# Healthcheck: hit /health over HTTPS (gunicorn terminates TLS on :443
+# when the Cloudflare Origin Cert is mounted at /etc/ssl/matrixhub).
+# -k allows the self-issued Cloudflare Origin Cert (not in the system
+# trust store); -f makes curl fail on non-2xx so the healthcheck reflects
+# /health's outcome. start-period=60s absorbs Alembic against a freshly
+# provisioned Postgres.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
+  CMD curl -kfsS "https://127.0.0.1:443/health" >/dev/null || exit 1
 
-# Default: supervisor (both Hub + Gateway). Compose can override `command:` to run API-only or Worker-only.
+# Default: run both via supervisor (entrypoint scrubs any SQLite before start).
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 CMD ["/usr/bin/supervisord", "-n", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
