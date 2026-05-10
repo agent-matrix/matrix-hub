@@ -352,10 +352,38 @@ def _fetch_and_parse_manifest(url: str) -> Dict[str, Any]:
         raise SkipManifest(f"Invalid YAML: {e}") from e
 
 
+# Catalog types whose manifests we want to keep ingesting even when the
+# JSON-Schema validator rejects them, provided the identity triple
+# (type, id, version) is present. This is a *defence-in-depth* fallback:
+# the producer side (mcp_ingest/registry/promote.py) emits
+# schema-compliant manifests for these types, but real-world data drift
+# is inevitable and we do NOT want a tightening of the schema -- or a
+# slightly-off external producer -- to silently empty the Tools or
+# Agents tab on matrixhub.io.
+_VALIDATE_BYPASS_TYPES: frozenset[str] = frozenset({"mcp_server", "tool", "agent"})
+
+
+def _has_identity(manifest: Dict[str, Any]) -> bool:
+    """The minimum a manifest needs for the rest of the ingest pipeline
+    (entity uid, dedupe, search) to function."""
+    return bool(
+        (manifest.get("type") or "").strip()
+        and (manifest.get("id") or "").strip()
+        and (manifest.get("version") or "").strip()
+    )
+
+
 def _maybe_validate(manifest: Dict[str, Any], source: str) -> Dict[str, Any]:
     """
     Try to validate via services.validate.validate_manifest(manifest),
     but don't hard-fail if validation isn't wired yet.
+
+    On validation failure, fall through to a permissive ingest only when
+    the manifest is one of the known catalog types (``mcp_server`` /
+    ``tool`` / ``agent``) AND carries the identity triple required by
+    the rest of the pipeline. This generalises the previous mcp_server-
+    only carve-out so the Tools and Agents tabs on matrixhub.io don't
+    silently empty when a producer drifts from the strict schema.
     """
     try:
         from .validate import validate_manifest  # type_ignore
@@ -365,21 +393,19 @@ def _maybe_validate(manifest: Dict[str, Any], source: str) -> Dict[str, Any]:
 
     try:
         return validate_manifest(manifest)
-    except Exception as e:
-        # Improved check: Instead of matching error strings, check the condition directly.
-        is_server = manifest.get("type") == "mcp_server"
-        artifacts_are_empty = not (manifest.get("artifacts") or [])
+    except Exception as exc:
+        mtype = (manifest.get("type") or "").strip()
 
-        if is_server and artifacts_are_empty:
-            # This is likely the cause of the validation error.
-            # We log it and proceed, as servers can have empty artifacts.
+        if mtype in _VALIDATE_BYPASS_TYPES and _has_identity(manifest):
             log.warning(
-                "Ignoring likely empty-artifact validation error for mcp_server: %s", source
+                "Schema validation failed for %s manifest at %s; "
+                "proceeding because identity fields are present. Reason: %s",
+                mtype, source, exc,
             )
             return manifest
 
-        # For all other errors, or for non-server types, raise to skip.
-        raise SkipManifest(f"Schema validation failed: {e}") from e
+        # Unknown type or missing identity: hard skip with the validator's reason.
+        raise SkipManifest(f"Schema validation failed: {exc}") from exc
 
 
 # ----------------- Upsert entity -----------------
