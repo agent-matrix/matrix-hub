@@ -20,7 +20,6 @@ VENV_DIR          ?= .venv
 UVICORN           ?= uvicorn
 APP               ?= src.app:app
 HOST              ?= 0.0.0.0
-# Changed port to 8000 to avoid needing sudo for development
 PORT              ?= 8000
 
 RUFF              ?= ruff
@@ -30,7 +29,6 @@ ALEMBIC_INI       ?= alembic.ini
 MKDOCS            ?= mkdocs
 ENV_FILE          ?= .env
 
-# Scripts & Operators
 BASH              ?= bash
 SCRIPTS_DIR       ?= scripts
 
@@ -38,30 +36,60 @@ SCRIPTS_DIR       ?= scripts
 GATEWAY_PROJECT_DIR ?= mcpgateway
 GATEWAY_HOST        ?= 0.0.0.0
 GATEWAY_PORT        ?= 4444
+GATEWAY_DIR         := $(CURDIR)/$(GATEWAY_PROJECT_DIR)
+GATEWAY_VENV_OK     := $(GATEWAY_DIR)/.venv/bin/activate
 
-# Load construct variables from .env
+SKIP_GATEWAY        ?= 0
+
+# WSL friendliness for uv: avoid the noisy hardlink-fallback warning when
+# the project tree and uv cache are on different filesystems (typical for
+# /mnt/c WSL projects). Operators can override.
+export UV_LINK_MODE ?= copy
+
 ENV := if [ -f "$(CURDIR)/$(ENV_FILE)" ]; then set -a; . "$(CURDIR)/$(ENV_FILE)"; set +a; fi;
-
-# Alembic - use ini if present
 ALEMBIC_CFG := $(if $(wildcard $(ALEMBIC_INI)),-c $(ALEMBIC_INI),)
-
-# Activate virtual construct
 activate = . $(VENV_DIR)/bin/activate
 
-# Pre-flight Checks
 .PHONY: ensure-env
 ensure-env:
-	@# Ensure construct reality file $(ENV_FILE) exists; if not, materialize from example.
 	@if [ ! -f $(ENV_FILE) ]; then \
-		if [ -f $(ENV_FILE).example ]; then \
+		if [ -f $(ENV_FILE).example.local ]; then \
+			cp $(ENV_FILE).example.local $(ENV_FILE); \
+			echo "$(DIM_GREEN)-> Materialized $(ENV_FILE) from $(ENV_FILE).example.local.$(RESET)"; \
+		elif [ -f $(ENV_FILE).example ]; then \
 			cp $(ENV_FILE).example $(ENV_FILE); \
 			echo "$(DIM_GREEN)-> Materialized $(ENV_FILE) from template.$(RESET)"; \
 		else \
-			echo "$(BRIGHT_GREEN)Warning: No $(ENV_FILE) or $(ENV_FILE).example found. The construct may be unstable.$(RESET)"; \
+			echo "$(BRIGHT_GREEN)Warning: No $(ENV_FILE) or $(ENV_FILE).example found.$(RESET)"; \
 		fi; \
 	fi
 
-# Main Directory
+.PHONY: fix-line-endings
+fix-line-endings:
+	@if find $(SCRIPTS_DIR) -name '*.sh' -print0 2>/dev/null | xargs -0 grep -lI $$'\r' 2>/dev/null | grep -q .; then \
+		echo "$(DIM_GREEN)-> Stripping CRLF from $(SCRIPTS_DIR)/*.sh ...$(RESET)"; \
+		find $(SCRIPTS_DIR) -name '*.sh' -print0 | xargs -0 sed -i 's/\r$$//' ; \
+	fi
+
+# Auto-install the MCP Gateway if it isn't already cloned + bootstrapped.
+# Crucially we pass `--no-start --non-interactive` so install does NOT
+# launch the gateway service — that's `make run`'s job. Otherwise
+# `make install && make run` collides on port 4444.
+.PHONY: gateway-ensure
+gateway-ensure: fix-line-endings
+	@if [ "$(SKIP_GATEWAY)" = "1" ]; then \
+		echo "$(DIM_GREEN)-> SKIP_GATEWAY=1; not installing the MCP Gateway.$(RESET)"; \
+	elif [ -f "$(GATEWAY_VENV_OK)" ]; then \
+		: ; \
+	else \
+		if [ -d "$(GATEWAY_DIR)" ] && [ ! -f "$(GATEWAY_VENV_OK)" ]; then \
+			echo "$(DIM_GREEN)-> Detected half-built gateway at $(GATEWAY_DIR); wiping for clean retry...$(RESET)"; \
+			rm -rf "$(GATEWAY_DIR)"; \
+		fi; \
+		echo "$(DIM_GREEN)-> MCP Gateway not bootstrapped at $(GATEWAY_DIR); running one-time setup (~1-3 min)...$(RESET)"; \
+		$(BASH) $(SCRIPTS_DIR)/setup-mcp-gateway.sh --no-start --non-interactive; \
+	fi
+
 .PHONY: help
 help:
 	@echo
@@ -71,11 +99,17 @@ help:
 	@printf "$(BRIGHT_GREEN)  %-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "--------------------" "--------------------------------------------------------"
 	@echo
 	@echo "$(BRIGHT_GREEN)Core Operations$(RESET)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "install" "📦 Install dependencies (alias for setup)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "setup" "🔌 Jack in & load programs (create .venv, install deps)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "install" "📦 Full prod-ready install: Hub venv + Gateway + .env (does NOT start)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "bootstrap" "🌱 Alias for install (kept for backwards compatibility)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "setup" "🔌 Hub venv only (legacy / advanced)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "build" "🏗️  Build Docker container (alias for container-build)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "dev" "😎 Operator mode (run API with live reload)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run" "▶️ Execute main program (run API in production mode)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "dev" "😎 Operator mode (Hub + Gateway, live reload)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "dev-hub" "🚀 Hub-only dev (skip Gateway, fast iteration)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run" "▶️  Execute main program (Hub + Gateway, prod mode)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "run-hub" "▶️  Hub-only prod (skip Gateway)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "stop" "🛑 Stop Hub + Gateway processes (PID files + name patterns + ports)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "clean" "🧹 Remove venvs, gateway clone, caches, data (keeps .env)"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "clean-all" "💣 Like clean, but ALSO removes .env and .env.bak.* files"
 	@echo
 	@echo "$(BRIGHT_GREEN)Index Management$(RESET)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "index-init" "🌱 Create an empty index construct"
@@ -94,7 +128,7 @@ help:
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "upgrade" "⏫ Apply all changes to reality (migrate to head)"
 	@echo
 	@echo "$(BRIGHT_GREEN)Zion Gateway (MCP)$(RESET)"
-	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "gateway-setup" "🛠️  Construct the gateway from source"
+	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "gateway-setup" "🛠️  Construct the gateway from source (and START it)"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "gateway-start" "📡 Open gateway to Zion"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "gateway-token" "🔑 Generate access token"
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "gateway-verify" "✔️  Verify gateway connection"
@@ -119,31 +153,146 @@ help:
 	@printf "  $(BRIGHT_GREEN)%-20s$(RESET) $(DIM_GREEN)%s$(RESET)\n" "logs-hub" "🧾 Tail hub logs"
 	@echo
 
-# Environment Construction
+# ============================================================================
+# Hub venv construction — verbose progress, uv-aware.
+# ============================================================================
 $(VENV_DIR)/installed: pyproject.toml
-	@echo "$(DIM_GREEN)-> Constructing reality... venv outdated or missing. Loading programs...$(RESET)"
-	@test -d $(VENV_DIR) || $(PY) -m venv $(VENV_DIR)
-	@. $(VENV_DIR)/bin/activate && pip install --upgrade pip setuptools wheel
-	@. $(VENV_DIR)/bin/activate && pip install --upgrade ."[dev]"
-	@echo "$(BRIGHT_GREEN)Setup complete. You are The One.$(RESET)"
+	@echo "$(BRIGHT_GREEN)→ Building Hub venv at $(VENV_DIR)/ $(RESET)"
+	@if command -v uv >/dev/null 2>&1; then \
+		echo "$(DIM_GREEN)  [1/3] Creating venv via 'uv venv --python 3.11' (fast)...$(RESET)"; \
+		test -d $(VENV_DIR) || uv venv --python 3.11 $(VENV_DIR); \
+		echo "$(DIM_GREEN)  [2/3] Upgrading pip/setuptools/wheel via uv pip...$(RESET)"; \
+		. $(VENV_DIR)/bin/activate && uv pip install --upgrade pip setuptools wheel; \
+		echo "$(DIM_GREEN)  [3/3] Installing matrix-hub[dev] (~30-90s on first run)...$(RESET)"; \
+		. $(VENV_DIR)/bin/activate && uv pip install --upgrade -e ".[dev]"; \
+	else \
+		echo "$(DIM_GREEN)  [1/3] Creating venv via 'python -m venv' ($(PY))...$(RESET)"; \
+		test -d $(VENV_DIR) || $(PY) -m venv $(VENV_DIR); \
+		echo "$(DIM_GREEN)  [2/3] Upgrading pip/setuptools/wheel...$(RESET)"; \
+		. $(VENV_DIR)/bin/activate && pip install --upgrade pip setuptools wheel; \
+		echo "$(DIM_GREEN)  [3/3] Installing matrix-hub[dev] (~60-180s on first run)...$(RESET)"; \
+		. $(VENV_DIR)/bin/activate && pip install --upgrade -e ".[dev]"; \
+	fi
+	@echo "$(BRIGHT_GREEN)✓ Hub venv ready. You are The One.$(RESET)"
 	@touch $@
 
-.PHONY: install setup
-install: setup
+# Headline target. `make install` does everything a fresh clone needs to
+# be ready for `make run`. It builds and configures, but does NOT start
+# any services — `make run` is the only place that does that.
+.PHONY: install bootstrap setup
+install: fix-line-endings $(VENV_DIR)/installed gateway-ensure ensure-env
+	@echo "$(BRIGHT_GREEN)Install complete (services NOT started).$(RESET)"
+	@echo "$(DIM_GREEN)  make run         — Hub + Gateway, prod mode$(RESET)"
+	@echo "$(DIM_GREEN)  make dev         — Hub + Gateway, live reload$(RESET)"
+	@echo "$(DIM_GREEN)  make run-hub     — Hub only (skip Gateway)$(RESET)"
+	@echo "$(DIM_GREEN)  make stop        — stop everything$(RESET)"
+
+bootstrap: install
 setup: $(VENV_DIR)/installed
 
+# ============================================================================
+# Stop everything (Hub + Gateway). Tries three signals in order:
+#   1. PID files written by start scripts (mcpgateway.pid, .gunicorn pid).
+#   2. SIGTERM by process-name pattern (covers gunicorn workers,
+#      uvicorn, mcpgateway CLI, run_prod.sh / run_dev.sh wrappers).
+#   3. After a 2 s grace, force-kill anything still listening on our
+#      well-known ports (443, 4444, $(PORT)).
+# Idempotent and safe to run when nothing is up.
+# ============================================================================
+.PHONY: stop
+# IMPORTANT — pgrep / pkill `-f <pattern>` is a self-match landmine.
+# A shell that runs `pkill -f 'mcpgateway --host'` has the literal
+# substring "mcpgateway --host" in its OWN command line, so pkill -f
+# matches and kills the recipe's own parent shell — operator saw
+# `make: *** [stop] Terminated` mid-recipe and the port-cleanup never ran.
+#
+# So we use `pgrep -x <basename>` (exact match against the executable's
+# argv[0] basename) which is immune to argv contents AND to whatever
+# other shells happen to be sitting around. We only fall back to `-f`
+# for the run_prod.sh / run_dev.sh wrappers, with the [r]un_prod regex
+# bracket trick to keep pgrep from self-matching.
+stop:
+	@echo "$(DIM_GREEN)-> Stopping Matrix Hub + MCP Gateway processes...$(RESET)"
+	@# (1) PID file from setup-mcp-gateway.sh
+	@if [ -f $(GATEWAY_PROJECT_DIR)/mcpgateway.pid ]; then \
+		pid=$$(cat $(GATEWAY_PROJECT_DIR)/mcpgateway.pid 2>/dev/null); \
+		if [ -n "$$pid" ] && kill -0 "$$pid" 2>/dev/null; then \
+			echo "  killing mcpgateway from PID file: $$pid"; \
+			kill "$$pid" 2>/dev/null || true; \
+		fi; \
+		rm -f $(GATEWAY_PROJECT_DIR)/mcpgateway.pid; \
+	fi
+	@# (2) Exact-basename matches (immune to argv self-match).
+	@for name in mcpgateway gunicorn uvicorn supervisord; do \
+		pids=$$(pgrep -x "$$name" 2>/dev/null | tr '\n' ' '); \
+		if [ -n "$$pids" ]; then \
+			echo "  TERM $$name: $$pids"; \
+			pkill -TERM -x "$$name" 2>/dev/null || true; \
+		fi; \
+	done
+	@# (3) Wrapper scripts (use [r] regex trick to dodge self-match).
+	@for pat in '[r]un_prod\.sh' '[r]un_dev\.sh'; do \
+		pids=$$(pgrep -f "$$pat" 2>/dev/null | tr '\n' ' '); \
+		if [ -n "$$pids" ]; then \
+			echo "  TERM [$$pat]: $$pids"; \
+			pkill -TERM -f "$$pat" 2>/dev/null || true; \
+		fi; \
+	done
+	@sleep 2
+	@if command -v lsof >/dev/null 2>&1; then \
+		for port in 443 4444 $(PORT); do \
+			pids=$$(lsof -nP -iTCP:$$port -sTCP:LISTEN -t 2>/dev/null); \
+			if [ -n "$$pids" ]; then \
+				echo "  KILL -9 leftover on :$$port: $$pids"; \
+				echo "$$pids" | xargs -r kill -9 2>/dev/null || true; \
+			fi; \
+		done; \
+	elif command -v fuser >/dev/null 2>&1; then \
+		for port in 443 4444 $(PORT); do \
+			fuser -k -KILL "$$port/tcp" 2>/dev/null || true; \
+		done; \
+	fi
+	@echo "$(BRIGHT_GREEN)✓ Stopped.$(RESET)"
+
+# ============================================================================
+# Tear-down
+# ============================================================================
+.PHONY: clean clean-all
+clean: stop
+	@echo "$(DIM_GREEN)-> Removing Hub venv ($(VENV_DIR)/), gateway clone ($(GATEWAY_PROJECT_DIR)/), data, and Python caches...$(RESET)"
+	@rm -rf $(VENV_DIR)
+	@rm -rf $(GATEWAY_PROJECT_DIR)
+	@rm -rf data
+	@rm -rf .pytest_cache .ruff_cache .mypy_cache build dist
+	@find . -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+	@find . -type d -name '*.egg-info' -prune -exec rm -rf {} + 2>/dev/null || true
+	@find . -type f -name '*.pyc' -delete 2>/dev/null || true
+	@echo "$(BRIGHT_GREEN)Clean complete. .env preserved. Run \`make install\` to rebuild.$(RESET)"
+
+clean-all: clean
+	@echo "$(DIM_GREEN)-> Also removing $(ENV_FILE) and $(ENV_FILE).bak.* ...$(RESET)"
+	@rm -f $(ENV_FILE)
+	@rm -f $(ENV_FILE).bak.* 2>/dev/null || true
+	@echo "$(BRIGHT_GREEN)Full reset complete. Run \`make install\` to start over.$(RESET)"
+
 # Main Program Execution
-.PHONY: dev
-dev: $(VENV_DIR)/installed ensure-env
+.PHONY: dev dev-hub run run-hub
+dev: $(VENV_DIR)/installed ensure-env gateway-ensure
 	@echo "$(DIM_GREEN)-> Entering Operator Mode... live reload enabled.$(RESET)"
 	@$(BASH) $(SCRIPTS_DIR)/run_dev.sh
 
-.PHONY: run
-run: $(VENV_DIR)/installed ensure-env
+dev-hub: $(VENV_DIR)/installed ensure-env fix-line-endings
+	@echo "$(DIM_GREEN)-> Hub-only dev mode (Gateway skipped).$(RESET)"
+	@GATEWAY_SKIP_START=1 $(BASH) $(SCRIPTS_DIR)/run_dev.sh
+
+run: $(VENV_DIR)/installed ensure-env gateway-ensure
 	@echo "$(DIM_GREEN)-> Executing main program...$(RESET)"
 	@$(BASH) $(SCRIPTS_DIR)/run_prod.sh
 
-# Documentation Archives
+run-hub: $(VENV_DIR)/installed ensure-env fix-line-endings
+	@echo "$(DIM_GREEN)-> Hub-only prod mode (Gateway skipped).$(RESET)"
+	@GATEWAY_SKIP_START=1 $(BASH) $(SCRIPTS_DIR)/run_prod.sh
+
 .PHONY: docs build-docs docs-deploy
 docs: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Accessing the Architect's records...$(RESET)"
@@ -157,7 +306,6 @@ docs-deploy: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Broadcasting records to Zion's mainframe...$(RESET)"
 	@$(activate) && $(MKDOCS) gh-deploy --force
 
-# Quality Control Unit
 .PHONY: lint fmt
 lint:
 	@echo "$(DIM_GREEN)-> Scanning for Agents...$(RESET)"
@@ -166,14 +314,12 @@ fmt:
 	@echo "$(DIM_GREEN)-> Bending the code...$(RESET)"
 	@$(activate) && $(RUFF) check --fix src tests
 
-# Simulation & Training
 .PHONY: test
 test: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Entering the Dojo... initiating simulations...$(RESET)"
 	@$(ENV) \
 	$(activate) && $(PYTEST) -q
 
-# Architect's Database (Alembic)
 .PHONY: init-alembic
 init-alembic: $(VENV_DIR)/installed ensure-env
 	@echo "$(DIM_GREEN)-> Initializing the database construct...$(RESET)"
@@ -194,23 +340,25 @@ upgrade: $(VENV_DIR)/installed ensure-env
 
 # Zion Gateway (MCP) Lifecycle
 .PHONY: deps gateway-install gateway-setup gateway-start gateway-token gateway-verify gateway-stop
-deps:
+deps: fix-line-endings
 	@$(BASH) $(SCRIPTS_DIR)/install-dependencies.sh
-gateway-install:
+gateway-install: fix-line-endings
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) HOST=$(GATEWAY_HOST) PORT=$(GATEWAY_PORT) \
 	$(BASH) $(SCRIPTS_DIR)/install_mcp_gateway.sh
-gateway-setup:
-	@$(BASH) $(SCRIPTS_DIR)/setup-mcp-gateway.sh
-gateway-start:
+# Manual standalone gateway-setup STARTS the gateway (matching the
+# pre-Makefile-orchestration behavior). For the Make-driven install path,
+# `gateway-ensure` calls the same script with --no-start.
+gateway-setup: fix-line-endings
+	@$(BASH) $(SCRIPTS_DIR)/setup-mcp-gateway.sh --non-interactive
+gateway-start: fix-line-endings
 	@$(BASH) $(SCRIPTS_DIR)/start-mcp-gateway.sh
-gateway-token:
+gateway-token: fix-line-endings
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/get-token-mcp-gateway.sh
-gateway-verify:
+gateway-verify: fix-line-endings
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/verify_servers.sh
-gateway-stop:
+gateway-stop: fix-line-endings
 	@PROJECT_DIR=$(GATEWAY_PROJECT_DIR) $(BASH) $(SCRIPTS_DIR)/stop-mcp-gateway.sh
 
-# Index Construct Management
 .PHONY: index-init index-add-url index-add-inline serve-index
 INDEX_OUT ?= matrix/index.json
 index-init:
@@ -230,8 +378,6 @@ serve-index:
 	@echo "$(DIM_GREEN)-> Broadcasting index construct at http://localhost:8001/index.json...$(RESET)"
 	@python3 -m http.server 8001
 
-# Residual Self-Image (Container)
-# Build-time variables
 IMAGE_NAME            ?= matrix-hub
 IMAGE_TAG             ?= latest
 HUB_INSTALL_TARGET    ?= prod
@@ -240,7 +386,6 @@ PLATFORM              ?=
 NO_CACHE              ?= 0
 PULL                  ?= 0
 BUILDX                ?= 0
-# Run-time variables
 CONTAINER_NAME        ?= matrix-hub
 APP_HOST_PORT         ?= 443
 GW_HOST_PORT          ?= 4444
@@ -255,7 +400,7 @@ GW_SKIP               ?= 0
 
 .PHONY: build container-build
 build: container-build
-container-build:
+container-build: fix-line-endings
 	@echo "$(DIM_GREEN)-> Compiling residual self-image into container $(IMAGE_NAME):$(IMAGE_TAG)...$(RESET)"
 	@$(BASH) $(SCRIPTS_DIR)/build_container.sh \
 		--image "$(IMAGE_NAME)" \
@@ -268,7 +413,7 @@ container-build:
 		$(if $(filter 1,$(BUILDX)),--buildx,)
 
 .PHONY: container-run
-container-run:
+container-run: fix-line-endings
 	@echo "$(DIM_GREEN)-> Deploying program $(CONTAINER_NAME) into the Matrix...$(RESET)"
 	@$(BASH) $(SCRIPTS_DIR)/run_container.sh \
 		--image "$(IMAGE_NAME)" \
@@ -285,7 +430,6 @@ container-run:
 		$(if $(filter 1,$(PULL_RUNTIME)),--pull,) \
 		$(if $(filter 0,$(REPLACE)),--no-replace,)
 
-# Monitoring & Logs
 MONITOR_INTERVAL ?= 5
 MONITOR_ARGS     ?=
 LOG_LINES ?= 200
@@ -304,9 +448,6 @@ logs-hub:
 	@CONTAINER_NAME=$${CONTAINER_NAME:-$(CONTAINER_NAME)} LINES=$${LINES:-$(LOG_LINES)} \
 	$(BASH) $(SCRIPTS_DIR)/logs-hub.sh $(ARGS)
 
-# ===========================================
-# Cloud Deployment (OCI)
-# ===========================================
 OCI_HOST        ?= 129.213.165.60
 OCI_USER        ?= opc
 OCI_SSH_KEY     ?= ~/.ssh/id_rsa
