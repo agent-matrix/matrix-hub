@@ -1,0 +1,203 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 640" font-family="system-ui,-apple-system,sans-serif">
+  <defs>
+    <style>
+      @keyframes coreGlow {
+        0%,100%{filter:drop-shadow(0 0 8px #00e887)}
+        50%{filter:drop-shadow(0 0 24px #00e887)}
+      }
+      @keyframes pulseSlow { 0%,100%{opacity:.55} 50%{opacity:1} }
+      .core-glow { animation: coreGlow 3.5s ease-in-out infinite }
+      .pulse-slow { animation: pulseSlow 3s ease-in-out infinite }
+      .sat-title { font-size: 15px; fill: #f1f5f9; font-weight: 800 }
+      .sat-sub   { font-size: 12px; fill: #94a3b8; font-weight: 500 }
+      .audience-label { font-size: 12px; fill: #cbd5e0; font-weight: 600 }
+      .audience-sub   { font-size: 10px; fill: #64748b }
+    </style>
+
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b0d10"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <radialGradient id="coreHalo" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#00e887" stop-opacity=".30"/>
+      <stop offset="60%" stop-color="#00e887" stop-opacity=".06"/>
+      <stop offset="100%" stop-color="#00e887" stop-opacity="0"/>
+    </radialGradient>
+
+    <!-- Arrowhead shared by every connector -->
+    <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#475569"/>
+    </marker>
+    <marker id="arrThin" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="640" rx="14" fill="url(#bg)"/>
+  <rect x="1" y="1" width="1198" height="638" rx="13" fill="none" stroke="#1e293b"/>
+
+  <!-- =====================================================================
+       Header — title + one-line value proposition
+       ===================================================================== -->
+  <text x="600" y="42" text-anchor="middle" font-size="30" fill="#e2e8f0" font-weight="900" letter-spacing="-0.5">Agent-Matrix</text>
+  <text x="600" y="68" text-anchor="middle" font-size="14" fill="#94a3b8">Open catalog and marketplace for MCP agents, tools, and runtimes</text>
+
+  <text x="40" y="30" font-size="10" fill="#475569" letter-spacing="2">OPEN · APACHE-2.0</text>
+  <text x="1160" y="30" text-anchor="end" font-size="10" fill="#475569" letter-spacing="1">github.com/agent-matrix</text>
+
+  <!-- =====================================================================
+       STEP 1 — connector lines drawn FIRST so they sit behind the
+       central card. Each line stops at the satellite’s connection point
+       and at the central card’s edge (not its centre), so no line passes
+       through the logo.
+       ===================================================================== -->
+  <g stroke="#334155" stroke-width="1.4" fill="none">
+    <!-- Top: Matrix-Hub -->
+    <path d="M600,180 L600,235" marker-end="url(#arr)"/>
+    <!-- Top-right: MatrixHub Cloud -->
+    <path d="M870,200 C780,230 720,260 690,275" marker-end="url(#arr)"/>
+    <!-- Bottom-right: MCP Gateway -->
+    <path d="M870,415 C780,395 720,375 690,360" marker-end="url(#arr)"/>
+    <!-- Bottom: Catalog -->
+    <path d="M600,445 L600,395" marker-end="url(#arr)"/>
+    <!-- Bottom-left: Protocol Helper -->
+    <path d="M330,415 C420,395 480,375 510,360" marker-end="url(#arr)"/>
+    <!-- Top-left: CLI & Admin -->
+    <path d="M330,200 C420,230 480,260 510,275" marker-end="url(#arr)"/>
+  </g>
+
+  <!-- =====================================================================
+       STEP 2 — satellite cards (drawn over the line tails)
+       ===================================================================== -->
+
+  <!-- Top: Matrix-Hub -->
+  <g transform="translate(490,118)">
+    <rect width="220" height="62" rx="10" fill="#0f172a" stroke="#00e887" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#00e887" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x1F525;</text>
+    <text x="50" y="29" class="sat-title">Matrix-Hub</text>
+    <text x="50" y="47" class="sat-sub">API + registry</text>
+  </g>
+
+  <!-- Top-right: MatrixHub Cloud -->
+  <g transform="translate(870,138)">
+    <rect width="230" height="62" rx="10" fill="#0f172a" stroke="#a78bfa" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#a78bfa" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x1F310;</text>
+    <text x="50" y="29" class="sat-title">MatrixHub Cloud</text>
+    <text x="50" y="47" class="sat-sub">Hosted marketplace</text>
+  </g>
+
+  <!-- Bottom-right: MCP Gateway -->
+  <g transform="translate(870,415)">
+    <rect width="230" height="62" rx="10" fill="#0f172a" stroke="#f59e0b" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#f59e0b" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x26A1;</text>
+    <text x="50" y="29" class="sat-title">MCP Gateway</text>
+    <text x="50" y="47" class="sat-sub">Runtime broker</text>
+  </g>
+
+  <!-- Bottom: Catalog -->
+  <g transform="translate(490,445)">
+    <rect width="220" height="62" rx="10" fill="#0f172a" stroke="#22d3ee" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#22d3ee" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x1F4E6;</text>
+    <text x="50" y="29" class="sat-title">Catalog</text>
+    <text x="50" y="47" class="sat-sub">Manifest repository</text>
+  </g>
+
+  <!-- Bottom-left: Protocol Helper -->
+  <g transform="translate(100,415)">
+    <rect width="230" height="62" rx="10" fill="#0f172a" stroke="#fb7185" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#fb7185" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x1F5A5;</text>
+    <text x="50" y="29" class="sat-title">Protocol Helper</text>
+    <text x="50" y="47" class="sat-sub">Desktop installer</text>
+  </g>
+
+  <!-- Top-left: CLI & Admin -->
+  <g transform="translate(100,138)">
+    <rect width="230" height="62" rx="10" fill="#0f172a" stroke="#38bdf8" stroke-opacity=".5" stroke-width="1.5"/>
+    <circle cx="24" cy="31" r="15" fill="#38bdf8" opacity=".15"/>
+    <text x="24" y="37" text-anchor="middle" font-size="17">&#x1F4BB;</text>
+    <text x="50" y="29" class="sat-title">CLI &amp; Admin</text>
+    <text x="50" y="47" class="sat-sub">Install + manage</text>
+  </g>
+
+  <!-- =====================================================================
+       STEP 3 — central halo + protected hub card
+       drawn AFTER the connectors so it cleanly covers any line tail
+       that would otherwise pass through it.
+       ===================================================================== -->
+  <circle cx="600" cy="315" r="180" fill="url(#coreHalo)"/>
+
+  <g class="core-glow" transform="translate(600,315)">
+    <!-- Solid card so connectors behind it disappear under the fill -->
+    <rect x="-95" y="-80" width="190" height="160" rx="22" fill="#00e887"/>
+    <rect x="-95" y="-80" width="190" height="160" rx="22" fill="none" stroke="#00b86d" stroke-width="2"/>
+    <text x="0" y="-26" text-anchor="middle" font-size="22" font-weight="900" fill="#041a10" letter-spacing="-0.5">Agent-Matrix</text>
+    <text x="0" y="6" text-anchor="middle" font-size="13" font-weight="700" fill="#041a10" letter-spacing="1">OPEN MCP CATALOG</text>
+    <text x="0" y="30" text-anchor="middle" font-size="11" font-weight="500" fill="#041a10" opacity=".7">Discover · Install · Govern</text>
+    <text x="0" y="58" text-anchor="middle" font-size="10" font-weight="600" fill="#041a10" opacity=".55" letter-spacing="2">APACHE-2.0</text>
+  </g>
+
+  <!-- =====================================================================
+       STEP 4 — animated flow dots (centre ↔ satellites)
+       Each dot starts JUST OUTSIDE the central card so the animation
+       reinforces the line direction without re-entering the protected
+       core area.
+       ===================================================================== -->
+  <!-- Outward dots (centre → satellite) -->
+  <circle r="4" fill="#00e887"><animateMotion dur="2.4s" repeatCount="indefinite" path="M600,235 L600,180"/></circle>
+  <circle r="4" fill="#a78bfa"><animateMotion dur="2.8s" repeatCount="indefinite" path="M690,275 C720,260 780,230 870,200" begin="0.3s"/></circle>
+  <circle r="4" fill="#f59e0b"><animateMotion dur="2.6s" repeatCount="indefinite" path="M690,360 C720,375 780,395 870,415" begin="0.6s"/></circle>
+  <circle r="4" fill="#22d3ee"><animateMotion dur="2.4s" repeatCount="indefinite" path="M600,395 L600,445" begin="0.9s"/></circle>
+  <circle r="4" fill="#fb7185"><animateMotion dur="2.8s" repeatCount="indefinite" path="M510,360 C480,375 420,395 330,415" begin="1.2s"/></circle>
+  <circle r="4" fill="#38bdf8"><animateMotion dur="2.6s" repeatCount="indefinite" path="M510,275 C480,260 420,230 330,200" begin="1.5s"/></circle>
+
+  <!-- Inward dots (satellite → centre) — smaller, dim -->
+  <circle r="3" fill="#00e887" opacity=".55"><animateMotion dur="3.4s" repeatCount="indefinite" path="M600,180 L600,235" begin="1.2s"/></circle>
+  <circle r="3" fill="#22d3ee" opacity=".55"><animateMotion dur="3.4s" repeatCount="indefinite" path="M600,445 L600,395" begin="2.1s"/></circle>
+  <circle r="3" fill="#a78bfa" opacity=".55"><animateMotion dur="3.6s" repeatCount="indefinite" path="M870,200 C780,230 720,260 690,275" begin="1.8s"/></circle>
+
+  <!-- =====================================================================
+       STEP 5 — audience strip with thin arrows pointing UP to the
+       satellite that primarily serves them
+       ===================================================================== -->
+  <line x1="40" y1="548" x2="1160" y2="548" stroke="#1e293b"/>
+  <text x="600" y="540" text-anchor="middle" font-size="10" fill="#475569" letter-spacing="2">WHO USES IT</text>
+
+  <!-- Thin upward arrows from each audience to their primary satellite -->
+  <g stroke="#334155" stroke-width="1" fill="none" stroke-dasharray="3,3">
+    <path d="M180,560 L215,508" marker-end="url(#arrThin)"/>   <!-- developers → CLI -->
+    <path d="M420,560 L600,508" marker-end="url(#arrThin)"/>   <!-- AI assistants → Gateway / Catalog -->
+    <path d="M780,560 L985,508" marker-end="url(#arrThin)"/>   <!-- operators → Gateway -->
+    <path d="M1020,560 L985,210" marker-end="url(#arrThin)"/>  <!-- contributors → Cloud / publish -->
+  </g>
+
+  <g transform="translate(150,580)">
+    <circle r="10" fill="#38bdf8" opacity=".25" class="pulse-slow"/>
+    <text x="0" y="4" text-anchor="middle" font-size="12">&#x1F468;</text>
+    <text x="22" y="0" class="audience-label">Developers</text>
+    <text x="22" y="14" class="audience-sub">CLI, SDK</text>
+  </g>
+  <g transform="translate(390,580)">
+    <circle r="10" fill="#a78bfa" opacity=".25" class="pulse-slow"/>
+    <text x="0" y="4" text-anchor="middle" font-size="12">&#x1F916;</text>
+    <text x="22" y="0" class="audience-label">AI Assistants</text>
+    <text x="22" y="14" class="audience-sub">Claude &#xB7; ChatGPT &#xB7; Cursor</text>
+  </g>
+  <g transform="translate(750,580)">
+    <circle r="10" fill="#f59e0b" opacity=".25" class="pulse-slow"/>
+    <text x="0" y="4" text-anchor="middle" font-size="12">&#x1F527;</text>
+    <text x="22" y="0" class="audience-label">Operators</text>
+    <text x="22" y="14" class="audience-sub">Hub Admin &#xB7; Gateway</text>
+  </g>
+  <g transform="translate(990,580)">
+    <circle r="10" fill="#fb7185" opacity=".25" class="pulse-slow"/>
+    <text x="0" y="4" text-anchor="middle" font-size="12">&#x1F465;</text>
+    <text x="22" y="0" class="audience-label">Contributors</text>
+    <text x="22" y="14" class="audience-sub">Publish manifests</text>
+  </g>
+</svg>

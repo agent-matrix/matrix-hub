@@ -1,0 +1,260 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 540" font-family="system-ui,-apple-system,sans-serif">
+  <defs>
+    <style>
+      @keyframes pulse { 0%,100%{opacity:.45} 50%{opacity:1} }
+      @keyframes glow { 0%,100%{filter:drop-shadow(0 0 3px #00e887)} 50%{filter:drop-shadow(0 0 10px #00e887)} }
+      .pulse { animation: pulse 2.2s ease-in-out infinite }
+      .glow { animation: glow 3s ease-in-out infinite }
+      .col-title { font-size: 12px; font-weight: 700; letter-spacing: 1.5px }
+      .col-sub { font-size: 10px; fill: #64748b }
+      .node-title { font-size: 13px; fill: #e2e8f0; font-weight: 700 }
+      .node-sub   { font-size: 10px; fill: #94a3b8 }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 9px; fill: #94a3b8 }
+      .badge { font-size: 10px; font-weight: 700; letter-spacing: 0.5px }
+      .stage-label { font-size: 10px; fill: #64748b; font-weight: 600; letter-spacing: 0.5px }
+    </style>
+
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0b0d10"/>
+      <stop offset="100%" stop-color="#020617"/>
+    </linearGradient>
+    <linearGradient id="sourceGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#06b6d4" stop-opacity=".15"/>
+      <stop offset="100%" stop-color="#06b6d4" stop-opacity=".03"/>
+    </linearGradient>
+    <linearGradient id="hubGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#00e887" stop-opacity=".18"/>
+      <stop offset="100%" stop-color="#00e887" stop-opacity=".04"/>
+    </linearGradient>
+    <linearGradient id="clientGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#a78bfa" stop-opacity=".18"/>
+      <stop offset="100%" stop-color="#a78bfa" stop-opacity=".04"/>
+    </linearGradient>
+
+    <marker id="arrCyan" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#22d3ee"/>
+    </marker>
+    <marker id="arrGreen" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#00e887"/>
+    </marker>
+    <marker id="arrPurple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#a78bfa"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="540" rx="12" fill="url(#bgGrad)"/>
+  <rect x="1" y="1" width="898" height="538" rx="11" fill="none" stroke="#1e293b"/>
+
+  <!-- Title -->
+  <text x="450" y="30" text-anchor="middle" font-size="18" fill="#e2e8f0" font-weight="800">Matrix-Hub Architecture</text>
+  <text x="450" y="48" text-anchor="middle" font-size="12" fill="#64748b">Sources → Ingest → Postgres → FastAPI → Consumers</text>
+
+  <!-- =============================================================
+       CYAN ARROWS (sources → ingest)   drawn first, behind boxes
+       Re-fanned for 4 sources after removing IBM Context Forge.
+       ============================================================= -->
+  <g stroke="#22d3ee" stroke-width="1.5" fill="none" opacity=".75">
+    <path d="M205,163 L265,170" marker-end="url(#arrCyan)"/>
+    <path d="M205,233 L265,180" marker-end="url(#arrCyan)"/>
+    <path d="M205,303 L265,190" marker-end="url(#arrCyan)"/>
+    <path d="M205,393 L265,200" marker-end="url(#arrCyan)"/>
+  </g>
+
+  <!-- =============================================================
+       PURPLE ARROWS (FastAPI → consumers)
+       ============================================================= -->
+  <g stroke="#a78bfa" stroke-width="1.5" fill="none" opacity=".75">
+    <path d="M610,400 L665,150" marker-end="url(#arrPurple)"/>
+    <path d="M610,400 L665,210" marker-end="url(#arrPurple)"/>
+    <path d="M610,400 L665,270" marker-end="url(#arrPurple)"/>
+    <path d="M610,400 L665,330" marker-end="url(#arrPurple)"/>
+    <path d="M610,400 L665,390" marker-end="url(#arrPurple)"/>
+  </g>
+
+  <!-- =============================================================
+       LEFT COLUMN — SOURCES (4 boxes evenly spaced)
+       ============================================================= -->
+  <rect x="20" y="75" width="185" height="380" rx="10" fill="url(#sourceGrad)" stroke="#06b6d4" stroke-opacity=".3"/>
+  <text x="112" y="98" text-anchor="middle" class="col-title" fill="#22d3ee">SOURCES</text>
+  <text x="112" y="113" text-anchor="middle" class="col-sub">Where manifests come from</text>
+
+  <g>
+    <rect x="35" y="140" width="155" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="48" y="160" font-size="15">&#x1F4E6;</text>
+    <text x="68" y="158" class="node-title">Catalog</text>
+    <text x="68" y="172" class="node-sub">~54k Git manifests</text>
+  </g>
+  <g>
+    <rect x="35" y="210" width="155" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="48" y="230" font-size="15">&#x1F310;</text>
+    <text x="68" y="228" class="node-title">MCP Registry</text>
+    <text x="68" y="242" class="node-sub">Weekly upstream sync</text>
+  </g>
+  <g>
+    <rect x="35" y="280" width="155" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="48" y="300" font-size="15">&#x1F4DD;</text>
+    <text x="68" y="298" class="node-title">Pull Requests</text>
+    <text x="68" y="312" class="node-sub">/publish wizard</text>
+  </g>
+  <g>
+    <rect x="35" y="370" width="155" height="46" rx="8" fill="#0f172a" stroke="#1e293b" stroke-dasharray="3,3"/>
+    <text x="48" y="390" font-size="15">&#x23F1;</text>
+    <text x="68" y="388" class="node-title">Scheduled Sync</text>
+    <text x="68" y="402" class="node-sub">Cron Mon 02:15 UTC</text>
+  </g>
+
+  <!-- =============================================================
+       MIDDLE COLUMN — MATRIX HUB CORE
+       ============================================================= -->
+  <rect x="245" y="75" width="385" height="395" rx="10" fill="url(#hubGrad)" stroke="#00e887" stroke-opacity=".35"/>
+  <text x="437" y="98" text-anchor="middle" class="col-title" fill="#00e887">MATRIX HUB</text>
+  <text x="437" y="113" text-anchor="middle" class="col-sub">FastAPI + Postgres &#xB7; api.matrixhub.io</text>
+
+  <!-- Stage 1: Ingest Pipeline -->
+  <text x="437" y="134" text-anchor="middle" class="stage-label">①  INGEST PIPELINE</text>
+  <rect x="265" y="140" width="345" height="68" rx="8" fill="#0f172a" stroke="#1e293b"/>
+  <g transform="translate(280,155)">
+    <rect width="100" height="38" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="17" text-anchor="middle" class="badge" fill="#22d3ee">HARVEST</text>
+    <text x="50" y="30" text-anchor="middle" class="node-sub">fetch + parse</text>
+  </g>
+  <g transform="translate(390,155)">
+    <rect width="100" height="38" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="17" text-anchor="middle" class="badge" fill="#22d3ee">VALIDATE</text>
+    <text x="50" y="30" text-anchor="middle" class="node-sub">schema + signing</text>
+  </g>
+  <g transform="translate(500,155)">
+    <rect width="100" height="38" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="17" text-anchor="middle" class="badge" fill="#22d3ee">PROMOTE</text>
+    <text x="50" y="30" text-anchor="middle" class="node-sub">tools + agents</text>
+  </g>
+
+  <!-- GREEN ARROW: Ingest → Postgres -->
+  <g stroke="#00e887" stroke-width="2" fill="none">
+    <path d="M437,210 L437,232" marker-end="url(#arrGreen)"/>
+  </g>
+
+  <!-- Stage 2: Postgres -->
+  <text x="437" y="228" text-anchor="middle" class="stage-label">②  POSTGRES 17</text>
+  <rect x="265" y="234" width="345" height="86" rx="8" fill="#0f172a" stroke="#1e293b"/>
+  <g transform="translate(280,255)">
+    <rect width="100" height="50" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="19" text-anchor="middle" class="badge" fill="#00e887">entity</text>
+    <text x="50" y="32" text-anchor="middle" class="node-sub">pg_trgm GIN</text>
+    <text x="50" y="43" text-anchor="middle" class="node-sub">26k rows</text>
+  </g>
+  <g transform="translate(390,255)">
+    <rect width="100" height="50" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="19" text-anchor="middle" class="badge" fill="#00e887">embedding</text>
+    <text x="50" y="32" text-anchor="middle" class="node-sub">vector search</text>
+    <text x="50" y="43" text-anchor="middle" class="node-sub">RAG corpus</text>
+  </g>
+  <g transform="translate(500,255)">
+    <rect width="100" height="50" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="50" y="19" text-anchor="middle" class="badge" fill="#00e887">remote</text>
+    <text x="50" y="32" text-anchor="middle" class="node-sub">index.json</text>
+    <text x="50" y="43" text-anchor="middle" class="node-sub">+ sync jobs</text>
+  </g>
+
+  <!-- GREEN ARROW: Postgres → FastAPI -->
+  <g stroke="#00e887" stroke-width="2" fill="none">
+    <path d="M437,322 L437,344" marker-end="url(#arrGreen)"/>
+  </g>
+
+  <!-- Stage 3: FastAPI Service -->
+  <text x="437" y="340" text-anchor="middle" class="stage-label">③  FASTAPI SERVICE</text>
+  <rect x="265" y="346" width="345" height="114" rx="8" fill="#0f172a" stroke="#1e293b"/>
+  <text x="285" y="365" font-size="11" fill="#cbd5e0" font-weight="600">Composite ranker (quality + recency + curated)</text>
+  <g transform="translate(280,376)">
+    <rect width="152" height="32" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="76" y="14" text-anchor="middle" class="badge" fill="#e2e8f0">REST API</text>
+    <text x="76" y="25" text-anchor="middle" class="mono">/catalog /search /entities</text>
+  </g>
+  <g transform="translate(442,376)">
+    <rect width="152" height="32" rx="6" fill="#020617" stroke="#334155"/>
+    <text x="76" y="14" text-anchor="middle" class="badge" fill="#e2e8f0">ADMIN API</text>
+    <text x="76" y="25" text-anchor="middle" class="mono">/remotes /ingest /registry</text>
+  </g>
+  <g transform="translate(280,415)" class="glow">
+    <rect width="314" height="32" rx="6" fill="#020617" stroke="#00e887" stroke-opacity=".5"/>
+    <text x="157" y="14" text-anchor="middle" class="badge" fill="#00e887">MCP-GATEWAY CONNECTOR</text>
+    <text x="157" y="25" text-anchor="middle" class="mono">/gateways/pending  &#xB7;  /registry/mcp</text>
+  </g>
+
+  <!-- =============================================================
+       RIGHT COLUMN — CONSUMERS
+       ============================================================= -->
+  <rect x="665" y="75" width="215" height="380" rx="10" fill="url(#clientGrad)" stroke="#a78bfa" stroke-opacity=".3"/>
+  <text x="772" y="98" text-anchor="middle" class="col-title" fill="#c4b5fd">CONSUMERS</text>
+  <text x="772" y="113" text-anchor="middle" class="col-sub">Who reads the API</text>
+
+  <g>
+    <rect x="680" y="128" width="185" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="693" y="148" font-size="15">&#x1F310;</text>
+    <text x="713" y="146" class="node-title">matrixhub.io</text>
+    <text x="713" y="160" class="node-sub">Public web marketplace</text>
+  </g>
+  <g>
+    <rect x="680" y="188" width="185" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="693" y="208" font-size="15">&#x1F4BB;</text>
+    <text x="713" y="206" class="node-title">Matrix CLI</text>
+    <text x="713" y="220" class="node-sub">matrix search / install</text>
+  </g>
+  <g>
+    <rect x="680" y="248" width="185" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="693" y="268" font-size="15">&#x1F5A5;</text>
+    <text x="713" y="266" class="node-title">Matrix Helper</text>
+    <text x="713" y="280" class="node-sub">matrix:// installer (desktop)</text>
+  </g>
+  <g>
+    <rect x="680" y="308" width="185" height="46" rx="8" fill="#0f172a" stroke="#334155"/>
+    <text x="693" y="328" font-size="15">&#x1F510;</text>
+    <text x="713" y="326" class="node-title">Hub Admin</text>
+    <text x="713" y="340" class="node-sub">Operator panel</text>
+  </g>
+  <g>
+    <rect x="680" y="368" width="185" height="46" rx="8" fill="#020617" stroke="#a78bfa" stroke-opacity=".4" stroke-dasharray="3,3"/>
+    <text x="693" y="388" font-size="15">&#x1F916;</text>
+    <text x="713" y="386" class="node-title">AI Assistants</text>
+    <text x="713" y="400" class="node-sub">Claude &#xB7; ChatGPT &#xB7; Cursor</text>
+  </g>
+
+  <!-- =============================================================
+       ANIMATED FLOW DOTS riding on the static arrow paths
+       ============================================================= -->
+  <!-- Cyan dots: source → ingest (4 sources now) -->
+  <circle r="3.5" fill="#22d3ee"><animateMotion dur="3s" repeatCount="indefinite" path="M205,163 L265,170"/></circle>
+  <circle r="3.5" fill="#22d3ee"><animateMotion dur="3.4s" repeatCount="indefinite" path="M205,233 L265,180" begin="0.5s"/></circle>
+  <circle r="3.5" fill="#22d3ee"><animateMotion dur="3.6s" repeatCount="indefinite" path="M205,303 L265,190" begin="1.5s"/></circle>
+  <circle r="3.5" fill="#22d3ee"><animateMotion dur="3.8s" repeatCount="indefinite" path="M205,393 L265,200" begin="2s"/></circle>
+
+  <!-- Green dots: internal flow -->
+  <circle r="4" fill="#00e887" class="glow"><animateMotion dur="2.2s" repeatCount="indefinite" path="M437,210 L437,232"/></circle>
+  <circle r="4" fill="#00e887" class="glow"><animateMotion dur="2.2s" repeatCount="indefinite" path="M437,322 L437,344" begin="0.8s"/></circle>
+
+  <!-- Purple dots: FastAPI → consumers -->
+  <circle r="3.5" fill="#a78bfa"><animateMotion dur="3s" repeatCount="indefinite" path="M610,400 L665,150"/></circle>
+  <circle r="3.5" fill="#a78bfa"><animateMotion dur="3.2s" repeatCount="indefinite" path="M610,400 L665,210" begin="0.4s"/></circle>
+  <circle r="3.5" fill="#a78bfa"><animateMotion dur="3.4s" repeatCount="indefinite" path="M610,400 L665,270" begin="0.8s"/></circle>
+  <circle r="3.5" fill="#a78bfa"><animateMotion dur="3s" repeatCount="indefinite" path="M610,400 L665,330" begin="1.2s"/></circle>
+  <circle r="3.5" fill="#a78bfa"><animateMotion dur="3.6s" repeatCount="indefinite" path="M610,400 L665,390" begin="1.6s"/></circle>
+
+  <!-- =============================================================
+       LEGEND — matches the visible arrows
+       ============================================================= -->
+  <rect x="20" y="492" width="860" height="1" fill="#1e293b"/>
+  <g>
+    <path d="M30,510 L52,510" stroke="#22d3ee" stroke-width="2" marker-end="url(#arrCyan)"/>
+    <text x="62" y="514" font-size="10" fill="#94a3b8">Source sync (HTTPS pull)</text>
+  </g>
+  <g>
+    <path d="M220,510 L242,510" stroke="#00e887" stroke-width="2" marker-end="url(#arrGreen)"/>
+    <text x="252" y="514" font-size="10" fill="#94a3b8">Hub internal flow</text>
+  </g>
+  <g>
+    <path d="M380,510 L402,510" stroke="#a78bfa" stroke-width="2" marker-end="url(#arrPurple)"/>
+    <text x="412" y="514" font-size="10" fill="#94a3b8">Consumer fetch (REST / matrix://)</text>
+  </g>
+  <text x="880" y="514" text-anchor="end" font-size="10" fill="#475569">api.matrixhub.io</text>
+</svg>
