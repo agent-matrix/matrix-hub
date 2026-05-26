@@ -15,14 +15,7 @@ Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 **Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
 It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
 
-* **API**: FastAPI on port **8000** (production: behind reverse proxy on 443)
-* **Frontend**: [matrixhub.io](https://matrixhub.io) — Next.js web UI ([ruslanmv/matrixhub](https://github.com/ruslanmv/matrixhub))
-* **DB**: PostgreSQL (SQLite supported for lightweight/dev use)
-* **Ingest**: Pull `index.json` from one or more remotes, validate & enrich manifests, optional chunk+embed
-* **Install**: Idempotent steps, project adapters, lockfile generation
-* **Auth**: Optional bearer‑token for admin endpoints
-* **Logs**: Structured JSON with correlation IDs
-* **Docker**: `docker pull ruslanmv/matrix-hub:latest`
+![](assets/matrix-hub-architecture.svg)
 
 ## What is Matrix Hub?
 
