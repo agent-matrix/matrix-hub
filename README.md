@@ -10,16 +10,18 @@
 [![Docs](https://img.shields.io/static/v1?label=docs\&message=mkdocs\&color=blue\&logo=mkdocs)](https://agent-matrix.github.io/matrix-hub/)
 [![License Apache‑2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE) <a href="https://github.com/ruslanmv/agent-generator"><img src="https://img.shields.io/badge/Powered%20by-agent--generator-brightgreen" alt="Powered by agent-generator"></a>
 
-Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
+Welcome to Matrix Hub, your all‑in‑one AI agent marketplace and installer!
 
-**Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
-It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
+**Matrix Hub** is your production‑ready catalog & installer for AI agents, custom tools, and MCP servers.
+It ingests well‑structured manifests from remote catalogs (e.g., GitHub), offers lightning‑fast **search** (lexical + semantic hybrid), safely computes and executes **install plans** (pip/uv, Docker, Git, ZIP), and can automatically **register** everything with your MCP Gateway.
+
+> **LLM gateway:** Matrix Hub itself does not call language models — search is lexical/embedding-based and ingestion is deterministic. When upstream components in the Agent-Matrix ecosystem (for example `matrix-maintainer` or `gitpilot`) need an LLM, they route through **OllaBridge Cloud** (`https://api.ollabridge.com/v1`), the single OpenAI-compatible gateway for the ecosystem. Matrix Hub does not require any `OLLABRIDGE_*` variables.
 
 ![](assets/matrix-hub-architecture.svg)
 
-## What is Matrix Hub?
+## What is Matrix Hub?
 
-Imagine PyPI for intelligent agents and custom tools—Matrix Hub ingests curated manifests from GitHub (or any remote catalog), lets you find the perfect agent in seconds using hybrid text + semantic search, and then safely installs everything into your project (pip, Docker, Git, or ZIP) with a single command. It even auto‑registers new services with your MCP Gateway, writes scaffolding adapters, and produces a lockfile so your builds are rock‑solid.
+Imagine PyPI for intelligent agents and custom tools—Matrix Hub ingests curated manifests from GitHub (or any remote catalog), lets you find the perfect agent in seconds using hybrid text + semantic search, and then safely installs everything into your project (pip, Docker, Git, or ZIP) with a single command. It even auto‑registers new services with your MCP Gateway, writes scaffolding adapters, and produces a lockfile so your builds are rock‑solid.
 
 ```mermaid
 flowchart TD
